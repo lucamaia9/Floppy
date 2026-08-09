@@ -23,6 +23,14 @@ class ServiceWorkerViewTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response["Content-Type"], "application/javascript")
 
+    def test_service_worker_is_available_without_login(self):
+        self.client.logout()
+
+        response = self.client.get(reverse("service_worker"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response["Content-Type"], "application/javascript")
+
     def test_service_worker_sets_no_cache_headers_and_static_only_policy(self):
         response = self.client.get(reverse("service_worker"))
 
