@@ -2,23 +2,42 @@
 
 set -e
 
-# Fail fast with a clear message if the SQLite file is already corrupt,
-# instead of burning through the migrate retry loop below to arrive at an
-# opaque "file is not a database" traceback (issue #508). Corruption here
-# often means the db directory sits on a network filesystem that doesn't
-# support SQLite's WAL locking - see README's SQLite persistence note.
-if [ -z "$DB_HOST" ] && [ -f /floppy/db/db.sqlite3 ]; then
-    if timeout 600 python -m config.sqlite_integrity /floppy/db/db.sqlite3; then
-        :
-    else
-        integrity_status=$?
-        # GNU timeout returns 124. BusyBox in the Floppy image returns 143.
-        case "$integrity_status" in
-            124|143)
-                echo "[entrypoint] Database integrity check exceeded 600 seconds. Migrations did not run. Check the database storage and try again." >&2
-                ;;
-        esac
-        exit "$integrity_status"
+DATA_DIR_INPUT=${FLOPPY_DATA_DIR:-/floppy/db}
+DATA_DIR=$(python -c 'from pathlib import Path; import sys; print(Path(sys.argv[1]).resolve())' "$DATA_DIR_INPUT")
+
+if [ "$DATA_DIR" = / ]; then
+    echo "[entrypoint] FLOPPY_DATA_DIR must resolve to a directory below /." >&2
+    exit 1
+fi
+
+if [ -z "$DB_HOST" ]; then
+    DB_FILE_INPUT=${FLOPPY_DB_PATH:-"${DATA_DIR_INPUT}/db.sqlite3"}
+    DB_FILE=$(python -c 'from pathlib import Path; import sys; print(Path(sys.argv[1]).resolve())' "$DB_FILE_INPUT")
+    DB_PARENT=$(python -c 'from pathlib import Path; import sys; print(Path(sys.argv[1]).parent)' "$DB_FILE")
+
+    if [ "$DB_PARENT" = / ]; then
+        echo "[entrypoint] FLOPPY_DB_PATH must use a database directory below /." >&2
+        exit 1
+    fi
+
+    # Fail fast with a clear message if the SQLite file is already corrupt,
+    # instead of burning through the migrate retry loop below to arrive at an
+    # opaque "file is not a database" traceback (issue #508). Corruption here
+    # often means the db directory sits on a network filesystem that doesn't
+    # support SQLite's WAL locking - see README's SQLite persistence note.
+    if [ -f "$DB_FILE" ]; then
+        if timeout 600 python -m config.sqlite_integrity "$DB_FILE"; then
+            :
+        else
+            integrity_status=$?
+            # GNU timeout returns 124. BusyBox in the image returns 143.
+            case "$integrity_status" in
+                124|143)
+                    echo "[entrypoint] Database integrity check exceeded 600 seconds. Migrations did not run. Check the database storage and try again." >&2
+                    ;;
+            esac
+            exit "$integrity_status"
+        fi
     fi
 fi
 
@@ -50,7 +69,26 @@ echo "[entrypoint] Fixing file ownership (PUID=${PUID} PGID=${PGID})" >&2
 groupmod -o -g "$PGID" abc
 usermod -o -u "$PUID" abc
 
-chown abc:abc /floppy
+chown abc:abc -- /floppy
+
+if [ -e "$DATA_DIR" ] && ! timeout 600 chown -R abc:abc -- "$DATA_DIR"; then
+    echo "[entrypoint] Cannot set ownership for FLOPPY_DATA_DIR ${DATA_DIR} with PUID=${PUID} and PGID=${PGID}. Fix the mount permissions or the IDs." >&2
+    exit 1
+fi
+
+if [ -z "$DB_HOST" ]; then
+    case "${DB_PARENT}/" in
+        "${DATA_DIR}/"*) ;;
+        *)
+            for path in "$DB_PARENT" "$DB_FILE" "$DB_FILE-wal" "$DB_FILE-shm"; do
+                if [ -e "$path" ] && ! timeout 600 chown abc:abc -- "$path"; then
+                    echo "[entrypoint] Cannot set ownership for FLOPPY_DB_PATH parent ${DB_PARENT} with PUID=${PUID} and PGID=${PGID}. Fix the mount permissions or the IDs." >&2
+                    exit 1
+                fi
+            done
+            ;;
+    esac
+fi
 
 # "logs" holds the rotating file handler every process configures at import time
 # (settings.LOG_FILE). settings.py creates the directory, so whichever process
@@ -60,8 +98,8 @@ chown abc:abc /floppy
 #
 # Bound each recursive chown: a stalled bind mount (e.g. network storage)
 # must degrade to a warning instead of hanging the boot silently (issue #341).
-for dir in db logs staticfiles /var/log/nginx /var/lib/nginx; do
-    timeout 600 chown -R abc:abc "$dir" || \
+for dir in "${LOG_DIR:-/floppy/logs}" /floppy/staticfiles /var/log/nginx /var/lib/nginx; do
+    timeout 600 chown -R abc:abc -- "$dir" || \
         echo "[entrypoint] WARNING: chown of ${dir} failed or timed out (stalled mount?); continuing" >&2
 done
 

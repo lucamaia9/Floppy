@@ -14,13 +14,15 @@ class EntrypointSQLiteIntegrityContractTests(SimpleTestCase):
         cls.script = ENTRYPOINT.read_text()
 
     def test_checker_runs_only_for_an_existing_sqlite_database(self):
-        self.assertIn(
-            'if [ -z "$DB_HOST" ] && [ -f /floppy/db/db.sqlite3 ]; then',
-            self.script,
+        sqlite_branch = 'if [ -z "$DB_HOST" ]; then'
+        existing_file_check = 'if [ -f "$DB_FILE" ]; then'
+        self.assertLess(
+            self.script.index(sqlite_branch),
+            self.script.index(existing_file_check),
         )
 
     def test_failed_check_exits_before_migrations(self):
-        checker = "python -m config.sqlite_integrity /floppy/db/db.sqlite3"
+        checker = 'python -m config.sqlite_integrity "$DB_FILE"'
         migration = "python manage.py migrate"
 
         self.assertLess(self.script.index(checker), self.script.index(migration))
@@ -28,7 +30,7 @@ class EntrypointSQLiteIntegrityContractTests(SimpleTestCase):
 
     def test_checker_timeout_is_bounded_and_reported(self):
         self.assertIn(
-            "timeout 600 python -m config.sqlite_integrity /floppy/db/db.sqlite3",
+            'timeout 600 python -m config.sqlite_integrity "$DB_FILE"',
             self.script,
         )
         self.assertIn("124|143)", self.script)

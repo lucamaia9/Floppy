@@ -171,6 +171,79 @@ Floppy exposes a REST API at `/api/v1` and ships an [MCP server](mcp_server/). I
 
 ## Configuration and deployment
 
+### SQLite data paths
+
+Floppy uses these rules when `DB_HOST` is not set:
+
+1. `FLOPPY_DB_PATH` selects the SQLite file.
+2. If `FLOPPY_DB_PATH` is not set, Floppy uses
+   `FLOPPY_DATA_DIR/db.sqlite3`.
+3. If neither variable is set, Floppy uses
+   `/floppy/db/db.sqlite3` in the container.
+
+An empty value does not override a path. A relative path starts from the
+process working directory. Use absolute paths so that each process uses the
+same location.
+
+If `SECRET` and `SECRET_FILE` are not set, the container stores its generated
+`secret_key` in `FLOPPY_DATA_DIR`. Floppy stores logs and backups in `LOG_DIR`
+and `BACKUP_DIR`. `FLOPPY_DATA_DIR` does not change those settings.
+
+This example stores the SQLite file and the generated key in one mounted
+directory:
+
+```yaml
+services:
+  floppy:
+    image: ghcr.io/dannyvfilms/floppy:latest
+    environment:
+      FLOPPY_DATA_DIR: /data/floppy
+    volumes:
+      - ./floppy-data:/data/floppy
+    ports:
+      - "8000:8000"
+```
+
+This example stores the SQLite file in a separate mounted directory:
+
+```yaml
+services:
+  floppy:
+    image: ghcr.io/dannyvfilms/floppy:latest
+    environment:
+      FLOPPY_DATA_DIR: /data/floppy
+      FLOPPY_DB_PATH: /database/floppy/db.sqlite3
+    volumes:
+      - ./floppy-data:/data/floppy
+      - ./floppy-database:/database/floppy
+    ports:
+      - "8000:8000"
+```
+
+Use a dedicated parent directory when `FLOPPY_DB_PATH` is outside
+`FLOPPY_DATA_DIR`. At startup, Floppy can change ownership recursively inside
+`FLOPPY_DATA_DIR`. It changes only the external database parent and the
+SQLite files when the database is outside that directory.
+
+Use local storage or block storage for SQLite. Do not use NFS, SMB/CIFS, or
+another network filesystem.
+
+Floppy does not move existing data when you set these variables. Use this
+procedure to change a path:
+
+1. Stop the Floppy container.
+2. Back up the current SQLite file.
+3. Copy the SQLite file to the new path. Copy its `-wal` and `-shm` companion
+   files if they are present.
+4. Copy the generated `secret_key` to the new data directory. You can set
+   `SECRET` instead if you already manage the key outside the data directory.
+5. Set the new path variables and mount each selected directory.
+6. Start Floppy and confirm that the existing library is present.
+
+If the database file is missing, Floppy creates an empty database. The
+deployment can then appear to have lost its library. If the old generated key
+is missing, existing sessions and signed data can become invalid.
+
 ### PostgreSQL
 
 Floppy uses PostgreSQL only when `DB_HOST` is set. Without it, it uses SQLite at `/floppy/db/db.sqlite3`. `DATABASE_URL` is not supported — set the individual `DB_*` variables.
@@ -412,8 +485,14 @@ upgrades matter.
 
 ### Persistence checklist
 
-- SQLite stores the app database at `/floppy/db/db.sqlite3`; persist `/floppy/db`. (Pre-rename `/yamtrack/db` mounts still resolve, so existing setups keep working.)
-- **Do not put `/floppy/db` on a network filesystem** (NFS, SMB/CIFS, or a NAS "share" mounted into Docker). Floppy's SQLite database uses WAL mode, which [SQLite's own documentation](https://sqlite.org/wal.html) warns is unsafe over network filesystems because they don't reliably support the locking it depends on - this can corrupt the database under normal concurrent use. Use local/block storage for `/floppy/db`, or set `DB_HOST` to use PostgreSQL if only network storage is available.
+- SQLite stores the app database at `/floppy/db/db.sqlite3` by default. Persist
+  `/floppy/db`, or persist each configured SQLite data path. Pre-rename
+  `/yamtrack/db` mounts still resolve, so existing setups keep working.
+- **Do not put the SQLite file on a network filesystem** such as NFS, SMB/CIFS,
+  or a NAS share that is mounted into Docker. Floppy uses SQLite WAL mode.
+  [SQLite documents](https://sqlite.org/wal.html) that WAL does not work over a
+  network filesystem. Use local storage or block storage. Set `DB_HOST` to use
+  PostgreSQL if only network storage is available.
 - PostgreSQL stores its database files at `/var/lib/postgresql/data`; persist that path on the Postgres container.
 - Redis stores sessions and background-task state; resetting Redis can log users out, but it should not delete accounts if the database is persisted.
 - Do not assume `DATABASE_URL` enables PostgreSQL. Floppy uses Postgres only when `DB_HOST` is set.

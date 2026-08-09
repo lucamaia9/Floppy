@@ -4,6 +4,7 @@ import contextlib
 import hashlib
 import json
 import os
+import secrets
 import subprocess
 import sys
 import warnings
@@ -21,6 +22,7 @@ from decouple import (
     undefined,
 )
 from django.core.cache import CacheKeyWarning
+from django.core.exceptions import ImproperlyConfigured
 from django.db.backends.signals import connection_created
 
 from config.runtime_profile import (
@@ -47,6 +49,14 @@ REDIS_PREFIX = config("REDIS_PREFIX", default=None)
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
+_data_dir_override = config("FLOPPY_DATA_DIR", default=None)
+FLOPPY_DATA_DIR = Path(_data_dir_override) if _data_dir_override else BASE_DIR / "db"
+_database_path_override = config("FLOPPY_DB_PATH", default=None)
+FLOPPY_DB_PATH = (
+    Path(_database_path_override)
+    if _database_path_override
+    else FLOPPY_DATA_DIR / "db.sqlite3"
+)
 DOCKER_SECRETS_DIR = Path("/run/secrets")
 
 
@@ -79,6 +89,37 @@ def secret(key, default=undefined, **kwargs):
     return secret_value
 
 
+def _load_or_create_docker_secret(path):
+    try:
+        if path.exists():
+            path.chmod(0o600)
+            return path.read_text(encoding="utf-8").strip(), False
+
+        path.parent.mkdir(parents=True, exist_ok=True)
+        value = secrets.token_urlsafe(50)
+        try:
+            secret_fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            path.chmod(0o600)
+            return path.read_text(encoding="utf-8").strip(), False
+
+        try:
+            with os.fdopen(secret_fd, "w", encoding="utf-8") as secret_file:
+                secret_file.write(value)
+            path.chmod(0o600)
+        except OSError:
+            path.unlink(missing_ok=True)
+            raise
+        else:
+            return value, True
+    except (OSError, UnicodeError) as err:
+        msg = (
+            f"Cannot create or read the generated secret key at {path}. "
+            "Make FLOPPY_DATA_DIR writable or set SECRET."
+        )
+        raise ImproperlyConfigured(msg) from err
+
+
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/stable/howto/deployment/checklist/
 
@@ -96,16 +137,9 @@ if not SECRET_KEY:
     if Path("/.dockerenv").exists():
         # Docker container: auto-generate and persist to the db volume so the
         # key survives container restarts without user intervention.
-        import secrets as _secrets
-        import warnings
-
-        _secret_file = BASE_DIR / "db" / "secret_key"
-        if _secret_file.exists():
-            SECRET_KEY = _secret_file.read_text().strip()
-        else:
-            SECRET_KEY = _secrets.token_urlsafe(50)
-            _secret_file.parent.mkdir(parents=True, exist_ok=True)
-            _secret_file.write_text(SECRET_KEY)
+        _secret_file = FLOPPY_DATA_DIR / "secret_key"
+        SECRET_KEY, secret_created = _load_or_create_docker_secret(_secret_file)
+        if secret_created:
             warnings.warn(
                 "SECRET env var is not set. A random key has been generated and "
                 f"saved to {_secret_file}. For production, set SECRET explicitly "
@@ -113,8 +147,6 @@ if not SECRET_KEY:
                 stacklevel=2,
             )
     else:
-        from django.core.exceptions import ImproperlyConfigured
-
         msg = (
             "SECRET env var is not set. To fix, run:\n\n"
             '  python -c "'
@@ -308,9 +340,6 @@ WSGI_APPLICATION = "config.wsgi.application"
 # Database
 # https://docs.djangoproject.com/en/stable/ref/settings/#databases
 
-# create db folder if it doesn't exist
-Path(BASE_DIR / "db").mkdir(parents=True, exist_ok=True)
-
 DB_HOST = config("DB_HOST", default=None)
 USING_SQLITE_DATABASE = not bool(DB_HOST)
 
@@ -360,6 +389,7 @@ if DB_HOST:
         DATABASES["default"]["OPTIONS"]["sslcertmode"] = sslcertmode
 
 else:
+    FLOPPY_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     SQLITE_BUSY_TIMEOUT_SECONDS = config(
         "SQLITE_BUSY_TIMEOUT_SECONDS",
         default=30,
@@ -371,7 +401,7 @@ else:
     DATABASES = {
         "default": {
             "ENGINE": "django.db.backends.sqlite3",
-            "NAME": BASE_DIR / "db" / "db.sqlite3",
+            "NAME": FLOPPY_DB_PATH,
             "OPTIONS": {
                 "timeout": SQLITE_BUSY_TIMEOUT_SECONDS,
             },
