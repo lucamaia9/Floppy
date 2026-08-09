@@ -427,6 +427,8 @@ else:
 # https://docs.djangoproject.com/en/stable/topics/cache/
 CACHE_TIMEOUT = 86400  # 24 hours
 REDIS_URL = config("REDIS_URL", default="redis://localhost:6379")
+REDIS_CACHE_URL = config("REDIS_CACHE_URL", default=None) or REDIS_URL
+REDIS_ADMIN_URL = config("REDIS_ADMIN_URL", default=None) or REDIS_CACHE_URL
 # Byte count or a redis.conf-style size ("256mb"). Unset means "derive one from
 # the host"; 0 means "never touch the operator's Redis". See app/redis_tuning.py.
 FLOPPY_REDIS_MAXMEMORY = config(
@@ -437,7 +439,7 @@ KEY_PREFIX = f"{REDIS_PREFIX}" if REDIS_PREFIX else ""
 CACHES = {
     "default": {
         "BACKEND": "django_redis.cache.RedisCache",
-        "LOCATION": REDIS_URL,
+        "LOCATION": REDIS_CACHE_URL,
         "TIMEOUT": CACHE_TIMEOUT,
         "VERSION": 14,
         "KEY_PREFIX": KEY_PREFIX,
@@ -1156,7 +1158,7 @@ SELECT2_THEME = "tailwindcss-4"
 
 # Celery settings
 
-CELERY_BROKER_URL = REDIS_URL
+CELERY_BROKER_URL = config("CELERY_BROKER_URL", default=None) or REDIS_URL
 CELERY_TIMEZONE = TIME_ZONE
 
 CELERY_BROKER_TRANSPORT_OPTIONS = {
@@ -1252,7 +1254,7 @@ CELERY_TASK_DEFAULT_PRIORITY = 5
 CELERY_TASK_PRIORITY_BACKGROUND = 9
 
 CELERY_RESULT_EXTENDED = True
-CELERY_RESULT_BACKEND = REDIS_URL
+CELERY_RESULT_BACKEND = config("CELERY_RESULT_BACKEND", default=None) or REDIS_URL
 CELERY_CACHE_BACKEND = "default"
 CELERY_RESULT_EXPIRES = 60 * 60 * 24 * 7  # 7 days
 CELERY_BEAT_SCHEDULER = "django_celery_beat.schedulers:DatabaseScheduler"

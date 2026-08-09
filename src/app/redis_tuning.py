@@ -22,8 +22,8 @@ Two rules govern the whole module:
   actionable warning, not a failed boot.
 
 The policy is ``volatile-lru``, not ``allkeys-lru``, because ``maxmemory`` is
-server-wide and this same instance is the Celery broker. Kombu's keys - the
-queue lists, ``_kombu.binding.*``, ``unacked*`` - carry no TTL, so
+server-wide and the selected server can also be the Celery broker. Kombu's
+keys - the queue lists, ``_kombu.binding.*``, ``unacked*`` - carry no TTL, so
 ``volatile-lru`` cannot evict them, while every Django cache entry has one
 (``CACHES["default"]["TIMEOUT"]`` applies whenever ``cache.set`` omits a
 timeout) and Celery results have ``CELERY_RESULT_EXPIRES``. That scopes
@@ -40,6 +40,7 @@ import logging
 import redis
 from django.conf import settings
 
+from app.log_safety import exception_summary
 from config.runtime_profile import MIB, PROFILE
 
 logger = logging.getLogger(__name__)
@@ -128,6 +129,18 @@ def _config_get(client: redis.Redis, name: str) -> str | None:
     return str(value)
 
 
+def _record_error(
+    summary: dict,
+    operation: str,
+    error: Exception,
+    next_action: str,
+) -> str:
+    """Add and return an actionable error that does not expose Redis details."""
+    message = f"{operation} failed ({exception_summary(error)}). {next_action}"
+    summary["errors"].append(message)
+    return message
+
+
 def tune_redis(*, dry_run: bool = False) -> dict:
     """Apply a memory ceiling and eviction policy to Redis if it has none.
 
@@ -136,7 +149,7 @@ def tune_redis(*, dry_run: bool = False) -> dict:
     """
     summary: dict = {"applied": {}, "skipped": {}, "errors": []}
 
-    redis_url = getattr(settings, "REDIS_URL", "") or ""
+    redis_url = getattr(settings, "REDIS_ADMIN_URL", "") or ""
     if not redis_url.startswith(("redis://", "rediss://")):
         summary["skipped"]["reason"] = "not_a_redis_url"
         return summary
@@ -151,9 +164,14 @@ def tune_redis(*, dry_run: bool = False) -> dict:
         current_maxmemory = parse_size(_config_get(client, "maxmemory"))
     except Exception as error:
         # Redis being unreachable is not this function's problem to solve; the
-        # cache layer reports it, and the next restart tries again.
-        summary["errors"].append(f"unreachable: {error}")
-        logger.info("Skipping Redis memory tuning, server not reachable: %s", error)
+        # startup log reports it, and the next restart tries again.
+        message = _record_error(
+            summary,
+            "Redis administration maxmemory read",
+            error,
+            "Check REDIS_ADMIN_URL and server availability.",
+        )
+        logger.info("Skipping Redis memory tuning. %s", message)
         return summary
 
     if current_maxmemory:
@@ -168,7 +186,14 @@ def tune_redis(*, dry_run: bool = False) -> dict:
         current_policy = _config_get(client, "maxmemory-policy")
     except Exception as error:
         current_policy = None
-        summary["errors"].append(f"maxmemory-policy read failed: {error}")
+        message = _record_error(
+            summary,
+            "Redis maxmemory-policy read",
+            error,
+            "Grant CONFIG access, configure Redis directly, or set "
+            "FLOPPY_REDIS_MAXMEMORY=0.",
+        )
+        logger.warning("%s", message)
 
     if dry_run:
         summary["applied"]["maxmemory"] = budget
@@ -182,13 +207,19 @@ def tune_redis(*, dry_run: bool = False) -> dict:
         client.config_set("maxmemory", budget)
         summary["applied"]["maxmemory"] = budget
     except Exception as error:
-        summary["errors"].append(f"maxmemory: {error}")
+        message = _record_error(
+            summary,
+            "Redis maxmemory update",
+            error,
+            "Grant CONFIG access, configure Redis directly, or set "
+            "FLOPPY_REDIS_MAXMEMORY=0.",
+        )
         logger.warning(
-            "Could not set a Redis memory ceiling (%s). Redis will grow without "
+            "%s Redis will grow without "
             "bound and can exhaust the host. Add this to your redis service in "
             'docker-compose.yml: command: redis-server --appendonly yes --save "" '
             "--maxmemory %dmb --maxmemory-policy volatile-lru",
-            error,
+            message,
             budget // MIB,
         )
         return summary
@@ -200,11 +231,17 @@ def tune_redis(*, dry_run: bool = False) -> dict:
             client.config_set("maxmemory-policy", "volatile-lru")
             summary["applied"]["maxmemory-policy"] = "volatile-lru"
         except Exception as error:
-            summary["errors"].append(f"maxmemory-policy: {error}")
-            logger.warning(
-                "Set Redis maxmemory but could not set maxmemory-policy (%s); with "
-                "noeviction Redis will reject writes once full rather than evict",
+            message = _record_error(
+                summary,
+                "Redis maxmemory-policy update",
                 error,
+                "Grant CONFIG access, configure Redis directly, or set "
+                "FLOPPY_REDIS_MAXMEMORY=0.",
+            )
+            logger.warning(
+                "Set Redis maxmemory, but the policy update failed. %s With "
+                "noeviction Redis will reject writes once full rather than evict",
+                message,
             )
     else:
         summary["skipped"]["maxmemory-policy"] = current_policy
@@ -234,8 +271,14 @@ def _tune_persistence(client: redis.Redis, summary: dict) -> None:
         if _config_get(client, "appendfsync") != "always":
             return
         client.config_set("appendfsync", "everysec")
-    except Exception as error:  # pragma: no cover - best-effort tuning
-        summary["errors"].append(f"appendfsync: {error}")
+    except Exception as error:
+        message = _record_error(
+            summary,
+            "Redis persistence update",
+            error,
+            "Configure Redis persistence directly or set FLOPPY_REDIS_MAXMEMORY=0.",
+        )
+        logger.warning("%s", message)
         return
     summary["applied"]["appendfsync"] = "everysec"
     logger.info(

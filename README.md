@@ -298,6 +298,10 @@ The only universally required variable is `SECRET`. For Docker installs you shou
 - `WEB_CONCURRENCY` / `GUNICORN_THREADS` - optional web server concurrency overrides. Leave both unset to use the detected host profile, especially on small or swapless hosts. Total concurrent requests = workers x threads
 - `FLOPPY_RESOURCE_TIER` - `standard`, `constrained`, or `minimal`. Floppy normally detects this from the host's memory, swap and CPU and scales its process count, batch sizes and background task cadence to match, so you should not need to set it. Use it to force a tier if detection guesses wrong - for example `standard` on a host whose cgroup understates the memory actually available
 - `FLOPPY_REDIS_MAXMEMORY` - Redis memory ceiling Floppy applies at startup when Redis has none of its own, as bytes or a size like `256mb`. Set it to `0` to leave your Redis configuration completely untouched. Floppy never overrides a `maxmemory` you set yourself
+- `REDIS_CACHE_URL` - Redis service for the Django cache and cached sessions. The default is `REDIS_URL`
+- `CELERY_BROKER_URL` - Redis service for queued Celery work. The default is `REDIS_URL`
+- `CELERY_RESULT_BACKEND` - Redis service for Celery results. The default is `REDIS_URL`
+- `REDIS_ADMIN_URL` - Redis service that Floppy can tune with `CONFIG`. The default is `REDIS_CACHE_URL`, then `REDIS_URL`
 - `DEBUG` - leave unset or `False` in production; enabling it slows every request (debug toolbar, no template caching) and is only meant for troubleshooting
 - `REGISTRATION` - set to `True` to allow new signups (needed for your first account), then set to `False` afterward
 - `DEMO_ACCOUNT_ENABLED` - defaults to `True`, provisioning the built-in `demo` / `demodemo` account after migrations. The examples above set it to `False`; only turn it on if you want a shared demo login
@@ -322,6 +326,47 @@ LASTFM_API_KEY=LASTFM_API_KEY
 SECRET=SECRET
 DEBUG=False
 ```
+
+### Use separate Redis services
+
+The standard configuration needs only `REDIS_URL`. Use the role settings when
+cache data and Celery data must use separate Redis services.
+
+```bash
+REDIS_URL=redis://limiter:6379/0
+REDIS_CACHE_URL=redis://cache:6379/0
+CELERY_BROKER_URL=redis://broker:6379/0
+CELERY_RESULT_BACKEND=redis://results:6379/0
+REDIS_ADMIN_URL=redis://cache:6379/0
+```
+
+Floppy applies these rules:
+
+1. `REDIS_CACHE_URL` uses `REDIS_URL` when it is empty or not set.
+2. `CELERY_BROKER_URL` uses `REDIS_URL` when it is empty or not set.
+3. `CELERY_RESULT_BACKEND` uses `REDIS_URL` when it is empty or not set.
+4. `REDIS_ADMIN_URL` uses `REDIS_CACHE_URL`, then `REDIS_URL`.
+5. The provider rate limiter continues to use `REDIS_URL`.
+
+Use a `redis://` or `rediss://` URL for Redis administration. Floppy skips
+automatic tuning when `REDIS_ADMIN_URL` uses another scheme. Set
+`FLOPPY_REDIS_MAXMEMORY=0` to stop all automatic Redis tuning.
+
+Redis `CONFIG` changes the complete Redis server. A database number in a Redis
+URL does not isolate this change. `REDIS_ADMIN_URL` must normally select the
+cache Redis server. Grant `CONFIG` access only when you want Floppy to manage
+the memory limit. You can also configure the Redis server directly.
+
+Plan a service change before you select new URLs:
+
+1. Let queued work finish before you change `CELERY_BROKER_URL`. A new broker
+   does not receive queued or unacknowledged work from the old broker.
+2. Preserve results that you still need before you change
+   `CELERY_RESULT_BACKEND`. The new backend does not contain old results.
+3. Expect the new cache to start empty. This can invalidate cached sessions,
+   but it does not delete accounts from the database.
+4. Restart the web, worker, and beat processes together. This makes all
+   processes use the same configuration.
 
 ### Running on a small host
 

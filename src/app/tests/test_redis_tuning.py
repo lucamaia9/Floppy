@@ -112,13 +112,26 @@ class DeriveBudgetTests(SimpleTestCase):
             )
 
 
-@override_settings(REDIS_URL="redis://localhost:6379", FLOPPY_REDIS_MAXMEMORY="256mb")
+@override_settings(
+    REDIS_ADMIN_URL="redis://localhost:6379",
+    FLOPPY_REDIS_MAXMEMORY="256mb",
+)
 class TuneRedisTests(SimpleTestCase):
     """Applying the ceiling to a live server."""
+
+    unsafe_error = "redis://admin:password@redis.example:6379/0 refused"
 
     def _run(self, client, **kwargs):
         with mock.patch.object(redis.Redis, "from_url", return_value=client):
             return tune_redis(**kwargs)
+
+    def _assert_safe_error(self, summary, logs, operation, error_type):
+        rendered = f"{summary}\n{' '.join(logs.output)}"
+        self.assertIn(operation, rendered)
+        self.assertIn(error_type, rendered)
+        self.assertNotIn(self.unsafe_error, rendered)
+        self.assertNotIn("admin:password", rendered)
+        self.assertNotIn("refused", rendered)
 
     def test_sets_ceiling_and_policy_on_an_untouched_redis(self):
         """The default noeviction/unlimited config is what we're here to fix."""
@@ -152,26 +165,117 @@ class TuneRedisTests(SimpleTestCase):
         """Managed Redis and ACLs refuse CONFIG SET; that must not fail boot."""
         client = fake_client()
         client.config_set.side_effect = redis.exceptions.ResponseError(
-            "unknown command 'CONFIG'",
+            self.unsafe_error,
         )
 
-        summary = self._run(client)
+        with self.assertLogs("app.redis_tuning", level="WARNING") as logs:
+            summary = self._run(client)
 
         self.assertEqual(summary["applied"], {})
         self.assertTrue(summary["errors"])
-        self.assertIn("maxmemory", summary["errors"][0])
+        self._assert_safe_error(
+            summary,
+            logs,
+            "Redis maxmemory update",
+            "ResponseError",
+        )
 
     def test_unreachable_redis_is_not_an_error_worth_raising(self):
         """The cache layer reports connectivity; this just tries again later."""
-        with mock.patch.object(
-            redis.Redis,
-            "from_url",
-            side_effect=redis.exceptions.ConnectionError("refused"),
+        with (
+            self.assertLogs("app.redis_tuning", level="INFO") as logs,
+            mock.patch.object(
+                redis.Redis,
+                "from_url",
+                side_effect=redis.exceptions.ConnectionError(self.unsafe_error),
+            ),
         ):
             summary = tune_redis()
 
         self.assertEqual(summary["applied"], {})
         self.assertTrue(summary["errors"])
+        self._assert_safe_error(
+            summary,
+            logs,
+            "Redis administration maxmemory read",
+            "ConnectionError",
+        )
+
+    def test_policy_read_error_is_safe(self):
+        """A CONFIG read error must not expose Redis connection details."""
+        client = fake_client()
+        config_get = client.config_get.side_effect
+
+        def fail_policy_read(name):
+            if name == "maxmemory-policy":
+                raise redis.exceptions.ResponseError(self.unsafe_error)
+            return config_get(name)
+
+        client.config_get.side_effect = fail_policy_read
+        with self.assertLogs("app.redis_tuning", level="WARNING") as logs:
+            summary = self._run(client)
+
+        self._assert_safe_error(
+            summary,
+            logs,
+            "Redis maxmemory-policy read",
+            "ResponseError",
+        )
+
+    def test_policy_update_error_is_safe(self):
+        """A CONFIG policy error must not expose Redis connection details."""
+        client = fake_client()
+        config_set = client.config_set.side_effect
+
+        def fail_policy_update(name, value):
+            if name == "maxmemory-policy":
+                raise redis.exceptions.ResponseError(self.unsafe_error)
+            return config_set(name, value)
+
+        client.config_set.side_effect = fail_policy_update
+        with self.assertLogs("app.redis_tuning", level="WARNING") as logs:
+            summary = self._run(client)
+
+        self._assert_safe_error(
+            summary,
+            logs,
+            "Redis maxmemory-policy update",
+            "ResponseError",
+        )
+
+    def test_persistence_update_error_is_safe(self):
+        """A CONFIG persistence error must not expose Redis connection details."""
+        client = fake_client({"appendonly": "yes", "appendfsync": "always"})
+        config_set = client.config_set.side_effect
+
+        def fail_persistence_update(name, value):
+            if name == "appendfsync":
+                raise redis.exceptions.ResponseError(self.unsafe_error)
+            return config_set(name, value)
+
+        client.config_set.side_effect = fail_persistence_update
+        with self.assertLogs("app.redis_tuning", level="WARNING") as logs:
+            summary = self._run(client)
+
+        self._assert_safe_error(
+            summary,
+            logs,
+            "Redis persistence update",
+            "ResponseError",
+        )
+
+    @override_settings(REDIS_ADMIN_URL="redis://admin.example:6379/0")
+    def test_uses_the_administration_url(self):
+        """Redis CONFIG must use the administration target."""
+        client = fake_client()
+        with mock.patch.object(
+            redis.Redis,
+            "from_url",
+            return_value=client,
+        ) as from_url:
+            tune_redis()
+
+        from_url.assert_called_once_with("redis://admin.example:6379/0")
 
     def test_dry_run_changes_nothing(self):
         """--dry-run must report the plan without touching the server."""
@@ -200,7 +304,7 @@ class TuneRedisTests(SimpleTestCase):
                 self.assertNotIn("appendfsync", summary["applied"])
                 self.assertEqual(client.values["appendfsync"], current)
 
-    @override_settings(REDIS_URL="memory://")
+    @override_settings(REDIS_ADMIN_URL="memory://")
     def test_non_redis_url_is_skipped(self):
         """Nothing to configure when the cache isn't Redis."""
         summary = tune_redis()

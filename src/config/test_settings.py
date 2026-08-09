@@ -5,7 +5,7 @@ from .settings import *  # noqa: F403
 CACHES = {
     "default": {
         "BACKEND": "django_redis.cache.RedisCache",
-        "LOCATION": REDIS_URL,  # noqa: F405
+        "LOCATION": REDIS_CACHE_URL,  # noqa: F405
         "TIMEOUT": 18000,  # 5 hours
         "OPTIONS": {
             "CONNECTION_POOL_KWARGS": {"connection_class": FakeConnection},

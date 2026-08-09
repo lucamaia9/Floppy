@@ -7,6 +7,8 @@ from django.apps import AppConfig
 from django.conf import settings
 from django.core.cache import cache
 
+from app.log_safety import exception_summary
+
 logger = logging.getLogger(__name__)
 
 # Five whole-library sweeps used to be enqueued at startup within 30 seconds of
@@ -120,16 +122,23 @@ class AppConfig(AppConfig):
             self._schedule_igdb_rating_backfill_reconcile()
             self._schedule_provider_backfill_reconcile()
 
-    def _add_startup_cache_key(self, cache_key: str, timeout: int = 86400) -> bool:
+    def _add_startup_cache_key(
+        self,
+        cache_key: str,
+        timeout: int = 86400,
+        *,
+        fail_open: bool = False,
+    ) -> bool:
         """Return whether a once-per-period startup task can be scheduled."""
         try:
             return bool(cache.add(cache_key, 1, timeout=timeout))
-        except Exception:
+        except Exception as error:
             logger.debug(
-                "Cache not available, skipping startup scheduling for %s",
+                "Startup cache key write failed for %s (%s). Check REDIS_CACHE_URL.",
                 cache_key,
+                exception_summary(error),
             )
-            return False
+            return fail_open
 
     def _repair_celery_redis_bindings(self):
         """Normalize persisted Kombu Redis bindings after separator changes."""
@@ -158,15 +167,24 @@ class AppConfig(AppConfig):
         only one of the container's processes issues the CONFIG SET even though
         every one of them runs ready(). Redis restarting resets its config, so
         the key's TTL is short enough that the next process start re-applies it.
+        If the cache guard raises, tuning continues because CONFIG operations
+        are idempotent and the administration Redis can still be available.
         """
-        if not self._add_startup_cache_key("redis_tuning_applied", timeout=300):
+        if not self._add_startup_cache_key(
+            "redis_tuning_applied",
+            timeout=300,
+            fail_open=True,
+        ):
             return
         try:
             from app.redis_tuning import tune_redis
 
             tune_redis()
         except Exception as error:
-            logger.warning("Failed to tune Redis memory limits: %s", error)
+            logger.warning(
+                "Redis memory tuning failed (%s). Run manage.py tune_redis --dry-run.",
+                exception_summary(error),
+            )
 
     def _schedule_runtime_population(self):
         """Schedule runtime population task to run once on startup."""

@@ -303,3 +303,53 @@ class AppStartupTests(TestCase):
             schedule["options"]["priority"],
             settings.CELERY_TASK_PRIORITY_BACKGROUND,
         )
+
+    def test_startup_cache_failure_is_closed_by_default(self):
+        """Other startup work must still stop when the cache guard fails."""
+        config = FloppyAppConfig("app", import_module("app"))
+        unsafe_error = "redis://cache:password@redis.example:6379/0 refused"
+
+        with (
+            patch("app.apps.cache.add", side_effect=RuntimeError(unsafe_error)),
+            self.assertLogs("app.apps", level="DEBUG") as logs,
+        ):
+            self.assertFalse(config._add_startup_cache_key("test-key"))
+
+        rendered = " ".join(logs.output)
+        self.assertIn("RuntimeError", rendered)
+        self.assertNotIn(unsafe_error, rendered)
+        self.assertNotIn("cache:password", rendered)
+        self.assertNotIn("refused", rendered)
+
+    def test_redis_tuning_continues_when_the_cache_guard_fails(self):
+        """The administration Redis can work while the cache Redis is down."""
+        config = FloppyAppConfig("app", import_module("app"))
+
+        with (
+            patch("app.apps.cache.add", side_effect=RuntimeError("secret text")),
+            patch("app.redis_tuning.tune_redis") as mock_tune,
+        ):
+            config._tune_redis()
+
+        mock_tune.assert_called_once_with()
+
+    def test_redis_tuning_startup_error_is_safe(self):
+        """Startup logs must show the error type but not its raw message."""
+        config = FloppyAppConfig("app", import_module("app"))
+        unsafe_error = "redis://admin:password@redis.example:6379/0 refused"
+
+        with (
+            patch.object(config, "_add_startup_cache_key", return_value=True),
+            patch(
+                "app.redis_tuning.tune_redis",
+                side_effect=RuntimeError(unsafe_error),
+            ),
+            self.assertLogs("app.apps", level="WARNING") as logs,
+        ):
+            config._tune_redis()
+
+        rendered = " ".join(logs.output)
+        self.assertIn("RuntimeError", rendered)
+        self.assertNotIn(unsafe_error, rendered)
+        self.assertNotIn("admin:password", rendered)
+        self.assertNotIn("refused", rendered)
