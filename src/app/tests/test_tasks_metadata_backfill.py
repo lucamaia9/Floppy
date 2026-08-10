@@ -1058,6 +1058,7 @@ class MetadataBackfillTaskTests(TestCase):
         self.assertIn(comic.id, queued_ids)
         self.assertIn(manga.id, queued_ids)
 
+    @override_settings(TVDB_API_KEY="test-tvdb-key")
     def test_genre_backfill_queryset_includes_tmdb_tv_until_current_version_marked(
         self,
     ):
@@ -1083,6 +1084,7 @@ class MetadataBackfillTaskTests(TestCase):
         queued_ids = set(tasks._genre_items_queryset().values_list("id", flat=True))
         self.assertNotIn(item.id, queued_ids)
 
+    @override_settings(TVDB_API_KEY="test-tvdb-key")
     @patch("app.tasks_genre.enqueue_genre_backfill_items")
     def test_reconcile_genre_backfill_queues_current_candidates_on_startup(
         self,
@@ -1269,6 +1271,7 @@ class MetadataBackfillTaskTests(TestCase):
         )
         self.assertEqual(result, {"selected": 1, "enqueued": 1})
 
+    @override_settings(TVDB_API_KEY="test-tvdb-key")
     @patch("app.providers.services.get_media_metadata")
     def test_populate_genre_data_for_tmdb_tv_adds_anime_from_tvdb_mapping(
         self,
@@ -1318,6 +1321,7 @@ class MetadataBackfillTaskTests(TestCase):
         self.assertEqual(result["errors"], 0)
         self.assertEqual(state.strategy_version, tasks.GENRE_BACKFILL_VERSION)
 
+    @override_settings(TVDB_API_KEY="test-tvdb-key")
     @patch("app.providers.services.get_media_metadata")
     def test_populate_genre_data_for_tmdb_tv_non_anime_marks_strategy_current(
         self,
@@ -1371,6 +1375,7 @@ class MetadataBackfillTaskTests(TestCase):
             set(tasks._genre_items_queryset().values_list("id", flat=True)),
         )
 
+    @override_settings(TVDB_API_KEY="test-tvdb-key")
     @patch("app.providers.services.get_media_metadata")
     def test_populate_genre_data_for_tmdb_tv_discovers_tvdb_mapping_from_tmdb_metadata(
         self,
@@ -1465,6 +1470,7 @@ class MetadataBackfillTaskTests(TestCase):
             item.source,
         )
 
+    @override_settings(TVDB_API_KEY="test-tvdb-key")
     @patch("app.providers.services.get_media_metadata")
     def test_populate_genre_data_for_tmdb_tv_records_failure_on_tvdb_error(
         self,

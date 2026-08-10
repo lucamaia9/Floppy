@@ -1305,6 +1305,7 @@ class PlexWebhookTests(TestCase):
         season_item.refresh_from_db()
         self.assertEqual(season_item.provider_metadata_status, "")
 
+    @override_settings(TVDB_API_KEY="test-tvdb-key")
     @patch("app.providers.tvdb.tv_with_seasons")
     @patch("app.providers.tmdb.tv_with_seasons")
     def test_tv_episode_genesis_uses_tvdb_when_preferred(

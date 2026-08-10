@@ -3,7 +3,7 @@ from unittest import mock
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.utils import timezone
 
 from app.models import (
@@ -342,6 +342,7 @@ class TestPlexHybridImport(TestCase):
         self.assertEqual(episode.item.media_id, "1515183")
         self.assertEqual(episode.item.title, "Yellowstone")
 
+    @override_settings(TVDB_API_KEY="test-tvdb-key")
     @patch("app.providers.tvdb.tv_with_seasons")
     @patch("integrations.imports.plex.app.providers.tvdb.enabled", return_value=True)
     def test_new_tv_show_genesis_uses_tvdb_when_preferred(

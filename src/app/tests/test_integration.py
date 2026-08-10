@@ -10,6 +10,7 @@ from django.utils import timezone
 from playwright.sync_api import expect, sync_playwright
 
 from app.models import Game, Item, MediaTypes, Movie, Sources, Status
+from app.tests.views.test_track_modal import _tv_with_seasons_payload
 from users.models import DateFormatChoices
 
 
@@ -25,7 +26,6 @@ class IntegrationTest(StaticLiveServerTestCase):
         cls.playwright = sync_playwright().start()
         # use headless=False, slow_mo=200 to see the browser
         cls.browser = cls.playwright.chromium.launch()
-        cls.page = cls.browser.new_page()
 
     def setUp(self):
         """Set up test data for CustomList model."""
@@ -33,6 +33,29 @@ class IntegrationTest(StaticLiveServerTestCase):
         self.user = get_user_model().objects.create_user(**self.credentials)
         self.user.date_format = DateFormatChoices.ISO_8601
         self.user.save(update_fields=["date_format"])
+        show = _tv_with_seasons_payload(
+            "1396",
+            Sources.TMDB.value,
+            title="Breaking Bad",
+            episode_count=1,
+        )
+        search = {
+            "page": 1,
+            "total_pages": 1,
+            "total_results": 1,
+            "results": [show],
+        }
+        for provider_patch in (
+            patch("app.providers.tmdb.search", return_value=search),
+            patch("app.providers.tmdb.tv", return_value=show),
+            patch("app.providers.tmdb.tv_with_seasons", return_value=show),
+            patch("app.providers.tmdb.get_tvdb_episode_image_map", return_value={}),
+        ):
+            provider_patch.start()
+            self.addCleanup(provider_patch.stop)
+
+        self.context = self.browser.new_context()
+        self.page = self.context.new_page()
         self.page.goto(f"{self.live_server_url}/")
         self.page.get_by_placeholder("Enter your username").fill(
             self.credentials["username"],
@@ -56,9 +79,14 @@ class IntegrationTest(StaticLiveServerTestCase):
     @classmethod
     def tearDownClass(cls):
         """Tear down the test class."""
-        super().tearDownClass()
         cls.browser.close()
         cls.playwright.stop()
+        super().tearDownClass()
+
+    def tearDown(self):
+        """Close browser connections before Django flushes the database."""
+        self.context.close()
+        super().tearDown()
 
     def test_season_progress_edit(self):
         """Test the progress edit of a season."""
