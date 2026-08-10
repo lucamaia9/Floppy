@@ -490,16 +490,54 @@ class StremioImporter:
                 return
             raise
 
+        library_media_type = ""
+        grouped_anime_match = None
+        if self.user.anime_enabled:
+            from app.services import grouped_anime
+
+            grouped_anime_match = grouped_anime.classify_tv_metadata(metadata)
+            if grouped_anime_match.is_grouped_anime:
+                library_media_type = MediaTypes.ANIME.value
+                if tv_instance is not None and not grouped_anime.promote_grouped_anime(
+                    tv_instance.item,
+                    grouped_anime_match,
+                ):
+                    self.warnings.append(
+                        f"{name}: exact anime match had a target-bucket collision; "
+                        "kept in TV",
+                    )
+                    library_media_type = ""
+
         if tv_instance is None:
-            tv_item, _ = app.models.Item.objects.get_or_create(
+            tv_item = helpers.find_item_across_buckets(
+                preferred_bucket=library_media_type or None,
                 media_id=tmdb_id,
                 source=Sources.TMDB.value,
                 media_type=MediaTypes.TV.value,
-                defaults={
-                    **app.models.Item.title_fields_from_metadata(metadata),
-                    "image": metadata["image"],
-                },
             )
+            if tv_item is None:
+                tv_item = app.models.Item.objects.create(
+                    media_id=tmdb_id,
+                    source=Sources.TMDB.value,
+                    media_type=MediaTypes.TV.value,
+                    library_media_type=library_media_type,
+                    **app.models.Item.title_fields_from_metadata(metadata),
+                    image=metadata["image"],
+                )
+
+            if (
+                library_media_type == MediaTypes.ANIME.value
+                and grouped_anime_match is not None
+                and not grouped_anime.promote_grouped_anime(
+                    tv_item,
+                    grouped_anime_match,
+                )
+            ):
+                self.warnings.append(
+                    f"{name}: exact anime match had a target-bucket collision; "
+                    "kept in TV",
+                )
+                library_media_type = ""
 
             tv_instance = app.models.TV(
                 item=tv_item,

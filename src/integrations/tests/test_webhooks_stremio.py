@@ -13,6 +13,8 @@ from app.models import (
     Season,
     Status,
 )
+from app.services.grouped_anime import GroupedAnimeMatch
+from integrations.webhooks.stremio import StremioWebhookProcessor
 
 
 class StremioAddonViewTests(TestCase):
@@ -106,6 +108,56 @@ class StremioWebhookProcessorTests(TestCase):
     def _get(self, media_type, media_id):
         return self.client.get(
             f"/stremio-addon/test-token/subtitles/{media_type}/{media_id}.json",
+        )
+
+    @patch.object(StremioWebhookProcessor, "_handle_tv_episode")
+    @patch("app.services.grouped_anime.classify_tv_metadata")
+    @patch("app.providers.tmdb.tv_with_seasons")
+    @patch.object(StremioWebhookProcessor, "_find_tv_media_id")
+    def test_exact_anime_match_routes_to_grouped_tv_episode(
+        self,
+        mock_find_tv,
+        mock_tv_with_seasons,
+        mock_classify,
+        mock_handle_episode,
+    ):
+        """A matched Stremio series is routed to the grouped TV structure."""
+        mock_find_tv.return_value = ("9001", None, None)
+        mock_tv_with_seasons.return_value = {
+            "title": "Anime Show",
+            "image": "https://example.com/show.jpg",
+            "tvdb_id": "7001",
+            "provider_external_ids": {"imdb_id": "tt9001001"},
+            "season/1": {
+                "image": "https://example.com/season.jpg",
+                "episodes": [{"episode_number": 1}],
+            },
+        }
+        mock_classify.return_value = GroupedAnimeMatch(
+            decision="move",
+            reason="exact_external_id_and_animation_genre",
+            tmdb_id="9001",
+            tvdb_id="7001",
+            mal_ids=("12345",),
+        )
+
+        processor = StremioWebhookProcessor()
+        processor._process_tv(
+            {"id": "tt9001001:1:1", "type": "series"},
+            self.user,
+            {"tmdb_id": None, "tvdb_id": None, "imdb_id": "tt9001001"},
+            season_number=1,
+            episode_number=1,
+        )
+
+        mock_handle_episode.assert_called_once_with(
+            "9001",
+            1,
+            1,
+            {"id": "tt9001001:1:1", "type": "series"},
+            self.user,
+            library_media_type="anime",
+            grouped_anime_match=mock_classify.return_value,
         )
 
     @tag("network")
