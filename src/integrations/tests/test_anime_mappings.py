@@ -11,6 +11,43 @@ from integrations.webhooks import anime_mappings
 class AnimeMappingsTests(TestCase):
     """Tests for AniBridge mapping resolution."""
 
+    def test_tmdb_episode_mapping_resolves_split_anime_season(self):
+        """Re:Zero TVDB S4E12 maps to the canonical TMDB S1E78."""
+        mapping_data = {
+            "tvdb_show:305089:s4": {
+                "tmdb_show:65942:s1": {"1-19": "67-85"},
+            },
+        }
+
+        self.assertEqual(
+            anime_mappings.get_tmdb_episode_mapping(
+                mapping_data,
+                65942,
+                4,
+                12,
+                tvdb_id=305089,
+            ),
+            (1, 78),
+        )
+
+    def test_tmdb_episode_mapping_rejects_other_target_shows(self):
+        """A mapping for another TMDB show cannot change show identity."""
+        mapping_data = {
+            "tvdb_show:305089:s4": {
+                "tmdb_show:99999:s1": {"1-19": "67-85"},
+            },
+        }
+
+        self.assertIsNone(
+            anime_mappings.get_tmdb_episode_mapping(
+                mapping_data,
+                65942,
+                4,
+                12,
+                tvdb_id=305089,
+            ),
+        )
+
     def test_find_entries_for_mal_id_skips_malformed_target_descriptors(self):
         """Reverse lookup ignores malformed target descriptors."""
         mapping_data = {

@@ -13,7 +13,9 @@ import logging
 
 import app.providers.tmdb
 from app import live_playback
+from app.log_safety import exception_summary
 from app.models import MediaTypes, Sources
+from integrations.webhooks import anime_mappings
 
 from .base import BaseWebhookProcessor
 
@@ -102,6 +104,32 @@ class StremioWebhookProcessor(BaseWebhookProcessor):
             return
 
         tv_metadata = app.providers.tmdb.tv(show_id)
+        if user.anime_enabled:
+            try:
+                mapping_data = anime_mappings.fetch_mapping_data()
+            except Exception as exc:  # pragma: no cover - defensive network guard
+                logger.warning(
+                    "AniBridge mapping lookup unavailable for Stremio playback: %s",
+                    exception_summary(exc),
+                )
+            else:
+                metadata_ids = tv_metadata.get("provider_external_ids") or {}
+                mapped = anime_mappings.get_tmdb_episode_mapping(
+                    mapping_data,
+                    show_id,
+                    season_number,
+                    episode_number,
+                    tvdb_id=tv_metadata.get("tvdb_id") or metadata_ids.get("tvdb_id"),
+                    imdb_id=imdb_id,
+                )
+                if mapped is not None:
+                    season_number, episode_number = mapped
+                    logger.info(
+                        "Mapped Stremio live episode for TMDB %s to S%sE%s",
+                        show_id,
+                        season_number,
+                        episode_number,
+                    )
         live_playback.apply_playback_event(
             user_id=user.id,
             event_type="media.play",

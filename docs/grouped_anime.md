@@ -109,6 +109,12 @@ no valid snapshot exists, grouping is skipped and the item remains TV.
   TV, season, and episode rows.
 - The Stremio playback-start webhook uses the same classifier before creating
   the in-progress episode structure.
+- When a grouped anime title has split provider numbering, the importer,
+  Plex history path, and playback webhooks resolve the watched episode through
+  the cached AniBridge v3 graph and accept only a target season belonging to
+  the already-resolved TMDB show. This keeps identities such as TVDB S4E19 →
+  TMDB S1E85 together across integrations; mapping or target-season failures
+  fail open to the existing provider/TMDB recovery paths.
 - The importer loads one snapshot per run instead of rebuilding indexes for
   each series. Webhook tasks do the same for their eligible TV event.
 - Exact IDs that resolve to separate connected-provider groups are reported as

@@ -85,6 +85,66 @@ def get_mal_id_from_tvdb(
     )
 
 
+def get_tmdb_episode_mapping(
+    mapping_data,
+    tmdb_id,
+    season_number,
+    episode_number,
+    *,
+    tvdb_id=None,
+    imdb_id=None,
+):
+    """Map an anime episode onto TMDB's season and episode numbering.
+
+    AniBridge entries are directional. Prefer source identifiers that describe
+    the incoming episode, then accept only a TMDB target for the already
+    resolved show so a mapping cannot silently change show identity.
+    """
+    if not isinstance(mapping_data, dict) or tmdb_id in (None, ""):
+        return None
+
+    try:
+        source_season = int(season_number)
+        source_episode = int(episode_number)
+    except (TypeError, ValueError):
+        return None
+    if source_season <= 0 or source_episode <= 0:
+        return None
+
+    source_descriptors = []
+    if tvdb_id not in (None, ""):
+        source_descriptors.append(
+            f"tvdb_show:{tvdb_id}:s{source_season}",
+        )
+    if imdb_id not in (None, ""):
+        source_descriptors.append(
+            f"imdb_show:{imdb_id}:s{source_season}",
+        )
+    source_descriptors.append(
+        f"tmdb_show:{tmdb_id}:s{source_season}",
+    )
+
+    target_prefix = f"tmdb_show:{tmdb_id}:s"
+    for source_descriptor in source_descriptors:
+        targets = mapping_data.get(source_descriptor, {})
+        if not isinstance(targets, dict):
+            continue
+        for target_descriptor, ranges in targets.items():
+            if not target_descriptor.startswith(target_prefix):
+                continue
+
+            try:
+                target_season = int(target_descriptor[len(target_prefix) :])
+                target_episode = _map_episode_number(ranges, source_episode)
+            except (TypeError, ValueError):
+                continue
+
+            if target_season > 0 and target_episode and target_episode > 0:
+                return target_season, target_episode
+
+    return None
+
+
 def get_mal_id_from_tmdb_movie(mapping_data, tmdb_movie_id):
     """Find MAL ID from TMDB movie mapping."""
     return _get_mal_mapping(

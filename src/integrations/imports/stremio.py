@@ -27,6 +27,7 @@ from simple_history.utils import bulk_update_with_history
 import app
 import app.providers.mal
 import app.providers.trakt
+from app.log_safety import exception_summary
 from app.models import MediaTypes, Sources, Status
 from app.models.tv import PRODUCTION_STATUS_ENDED, classify_production_status
 from app.providers import services
@@ -35,6 +36,7 @@ from integrations import anime_mapping, connection_health, import_progress
 from integrations.imports import helpers
 from integrations.imports.helpers import MediaImportError, MediaImportUnexpectedError
 from integrations.models import StremioAccount
+from integrations.webhooks import anime_mappings
 
 logger = logging.getLogger(__name__)
 
@@ -234,6 +236,7 @@ class StremioImporter:
         self.to_delete = defaultdict(lambda: defaultdict(set))
         self.bulk_media = defaultdict(list)
         self.bulk_season_by_item_id = {}
+        self._anibridge_mapping_data = None
 
         logger.info(
             "Initialized Stremio importer for user %s with mode %s",
@@ -268,6 +271,16 @@ class StremioImporter:
         )
 
         grouped_anime_snapshot = grouped_anime.UNSET
+        if self.user.anime_enabled and series:
+            try:
+                self._anibridge_mapping_data = anime_mappings.fetch_mapping_data()
+            except Exception as error:  # pragma: no cover - defensive network guard
+                logger.warning(
+                    "stremio_anibridge_mapping_unavailable user_id=%s error=%s",
+                    self.user.id,
+                    exception_summary(error),
+                )
+
         if self.user.anime_enabled and series:
             try:
                 grouped_anime_snapshot = anime_mapping.load_mapping_snapshot()
@@ -646,12 +659,17 @@ class StremioImporter:
         try:
             metadata = app.providers.tmdb.tv_with_seasons(tmdb_id, season_numbers)
         except services.ProviderAPIError as error:
-            if error.status_code == requests.codes.not_found:
-                self.warnings.append(
-                    f"{name}: not found in {Sources.TMDB.label} with ID {tmdb_id}.",
-                )
-                return
-            raise
+            if error.status_code != requests.codes.not_found:
+                raise
+            try:
+                metadata = app.providers.tmdb.tv(tmdb_id)
+            except services.ProviderAPIError as fallback_error:
+                if fallback_error.status_code == requests.codes.not_found:
+                    self.warnings.append(
+                        f"{name}: not found in {Sources.TMDB.label} with ID {tmdb_id}.",
+                    )
+                    return
+                raise
 
         library_media_type = ""
         grouped_anime_match = None
@@ -731,6 +749,24 @@ class StremioImporter:
             tv_instance._history_date = self._get_history_date(entry)
             self.bulk_media[MediaTypes.TV.value].append(tv_instance)
 
+        canonicalized_anime = False
+        if (
+            watched_episodes
+            and library_media_type == MediaTypes.ANIME.value
+            and grouped_anime_match is not None
+            and grouped_anime_match.is_grouped_anime
+        ):
+            (
+                watched_episodes,
+                metadata,
+                canonicalized_anime,
+            ) = self._canonicalize_anime_episodes(
+                entry_id,
+                tmdb_id,
+                metadata,
+                watched_episodes,
+            )
+
         if watched_episodes:
             self._process_seasons_and_episodes(
                 entry,
@@ -739,7 +775,64 @@ class StremioImporter:
                 metadata,
                 watched_episodes,
                 name,
+                canonicalized_anime=canonicalized_anime,
             )
+
+    def _canonicalize_anime_episodes(
+        self,
+        entry_id,
+        tmdb_id,
+        metadata,
+        watched_episodes,
+    ):
+        """Map grouped-anime episodes to the canonical TMDB season identity."""
+        mapping_data = self._anibridge_mapping_data
+        if not mapping_data:
+            return watched_episodes, metadata, False
+
+        classified = classify_stremio_id(entry_id)
+        imdb_id = classified[1] if classified and classified[0] == "imdb" else None
+        metadata_ids = metadata.get("provider_external_ids") or {}
+        tvdb_id = metadata.get("tvdb_id") or metadata_ids.get("tvdb_id")
+
+        canonical_episodes = []
+        for season_number, episode_number in watched_episodes:
+            mapped = anime_mappings.get_tmdb_episode_mapping(
+                mapping_data,
+                tmdb_id,
+                season_number,
+                episode_number,
+                tvdb_id=tvdb_id,
+                imdb_id=imdb_id,
+            )
+            canonical_episodes.append(mapped or (season_number, episode_number))
+
+        canonical_episodes = sorted(set(canonical_episodes))
+        if canonical_episodes == watched_episodes:
+            return watched_episodes, metadata, False
+
+        target_seasons = sorted(
+            {season_number for season_number, _ in canonical_episodes},
+        )
+        try:
+            canonical_metadata = app.providers.tmdb.tv_with_seasons(
+                tmdb_id,
+                target_seasons,
+            )
+        except services.ProviderAPIError as error:
+            logger.warning(
+                "Canonical TMDB season lookup failed for Stremio anime %s: %s",
+                tmdb_id,
+                exception_summary(error),
+            )
+            return watched_episodes, metadata, False
+
+        logger.info(
+            "Mapped Stremio anime episodes for TMDB %s from source numbering "
+            "onto canonical seasons",
+            tmdb_id,
+        )
+        return canonical_episodes, canonical_metadata, True
 
     def _watched_videos(self, entry, video_ids, name):
         """Return the set of watched video ids for a series entry."""
@@ -797,6 +890,8 @@ class StremioImporter:
         metadata,
         watched_episodes,
         name,
+        *,
+        canonicalized_anime=False,
     ):
         """Create season and episode records for watched episodes."""
         episodes_by_season = defaultdict(list)
@@ -842,17 +937,33 @@ class StremioImporter:
                 for number in episode_numbers
                 if int(number) > 0
             }
-            season_complete = (
-                max_progress > 0
-                and set(range(1, max_progress + 1)).issubset(
-                    watched_episode_numbers,
+            if canonicalized_anime:
+                # Remapped anime episodes live under a season the source
+                # numbering never names, so max_progress cannot decide
+                # completion. Only the season's own known episodes can.
+                known_episode_numbers = {
+                    episode.get("episode_number")
+                    for episode in season_metadata.get("episodes", [])
+                    if episode.get("episode_number") is not None
+                }
+                season_status = (
+                    Status.COMPLETED.value
+                    if known_episode_numbers
+                    and known_episode_numbers.issubset(watched_episode_numbers)
+                    else Status.IN_PROGRESS.value
                 )
-            )
-            season_status = (
-                Status.COMPLETED.value
-                if season_complete
-                else Status.IN_PROGRESS.value
-            )
+            else:
+                season_complete = (
+                    max_progress > 0
+                    and set(range(1, max_progress + 1)).issubset(
+                        watched_episode_numbers,
+                    )
+                )
+                season_status = (
+                    Status.COMPLETED.value
+                    if season_complete
+                    else Status.IN_PROGRESS.value
+                )
 
             # An already-tracked show reaches here on re-sync (tv_instance may
             # be the existing, saved TV row) - a season already created by a
