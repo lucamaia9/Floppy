@@ -10,9 +10,11 @@ import logging
 from dataclasses import dataclass
 from datetime import timedelta
 
+from django.db import transaction
 from django.db.models import Q
+from django.utils import timezone
 
-from app.models import Item
+from app.models import Episode, Item, Movie, PlaybackProgress
 from app.models.choices import MediaTypes, Sources
 
 from .stremio_playback import _parse_episode
@@ -333,3 +335,89 @@ def apply_observation(session, observation):
         settled=bool(session.get("settled")),
         last_event_at=session.get("last_event_at"),
     )
+
+
+def play_external_id(media_id, video_id, session_started_at):
+    """Build the deduplicating id for one session's play.
+
+    MoviePlay/Episode plays carry a unique constraint on (media, external_id),
+    so the database rejects a duplicate append even if the merge policy is
+    wrong. The session start time is what distinguishes a rewatch from a
+    repeated observation of the same watch.
+    """
+    stamp = ""
+    if session_started_at is not None:
+        stamp = (
+            session_started_at.isoformat()
+            if hasattr(session_started_at, "isoformat")
+            else str(session_started_at)
+        )
+    return f"stremio:{media_id}:{video_id or ''}:{stamp}"
+
+
+def _append_play(user, item, external_id, ended_at):
+    """Append one history play for a completed session.
+
+    Returns whether a play was created. `Movie.watch` returns `(play, created)`;
+    `Season.watch` returns an `EpisodeWatchResult(episode, created)`.
+    """
+    movie = Movie.objects.filter(item=item, user=user).first()
+    if movie is not None:
+        _play, created = movie.watch(ended_at, external_id=external_id)
+        return bool(created)
+
+    episode = (
+        Episode.objects.filter(item=item, related_season__user=user)
+        .select_related("related_season")
+        .first()
+    )
+    if episode is not None:
+        result = episode.related_season.watch(
+            item.episode_number,
+            ended_at,
+            external_id=external_id,
+        )
+        return bool(result.created)
+
+    return False
+
+
+def persist_merge_result(
+    user,
+    item,
+    result,
+    *,
+    media_id,
+    video_id,
+    session_started_at,
+    ended_at,
+):
+    """Write one merge result. Returns whether a history play was appended."""
+    if item is None:
+        return False
+
+    ended_at = ended_at or timezone.now()
+
+    with transaction.atomic():
+        if result.clear_progress:
+            PlaybackProgress.objects.filter(user=user, item=item).delete()
+        elif result.position_seconds is not None:
+            PlaybackProgress.objects.update_or_create(
+                user=user,
+                item=item,
+                defaults={
+                    "position_seconds": result.position_seconds,
+                    "duration_seconds": result.duration_seconds,
+                    "completed": result.completed,
+                },
+            )
+
+        if not result.record_play:
+            return False
+
+        return _append_play(
+            user,
+            item,
+            play_external_id(media_id, video_id, session_started_at),
+            ended_at,
+        )
