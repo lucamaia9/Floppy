@@ -14,8 +14,8 @@ class ParsePlayerExtraTests(SimpleTestCase):
         self.assertEqual(event.position_seconds, 123)
         self.assertEqual(event.duration_seconds, 5400)
 
-    def test_percent_encoded_colons_are_decoded(self):
-        """The extra arrives percent-encoded from a path segment."""
+    def test_pause_converts_milliseconds_to_seconds(self):
+        """A second action, `pause`, converts ms to seconds the same way."""
         event = stremio_events.parse_player_extra(
             "action=pause&currentTime=600000&duration=2700000",
         )
@@ -87,6 +87,10 @@ class ParseLibraryExtraTests(SimpleTestCase):
 
     def test_unknown_action_is_rejected(self):
         self.assertIsNone(stremio_events.parse_library_extra("action=renamed"))
+
+    def test_empty_extra_is_rejected(self):
+        self.assertIsNone(stremio_events.parse_library_extra(""))
+        self.assertIsNone(stremio_events.parse_library_extra(None))
 
     def test_blank_batch_entries_are_dropped(self):
         event = stremio_events.parse_library_extra("action=watched&videoId=tt1%3A1%3A2%2C")
