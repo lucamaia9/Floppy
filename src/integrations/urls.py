@@ -358,4 +358,34 @@ urlpatterns = [
         views.stremio_addon_subtitles,
         name="stremio_addon_subtitles",
     ),
+    # `player` and `library` capture the extra: position and duration travel in
+    # it, unlike the subtitles route where it is discarded.
+    re_path(
+        r"^stremio-addon/(?P<token>[^/]+)/c/(?P<config>[^/]+)/player/"
+        r"(?P<media_type>movie|series)/(?P<media_id>[^/]+?)/"
+        r"(?P<extra>[^/]*)\.json$",
+        views.stremio_addon_player,
+        name="stremio_addon_player_configured",
+    ),
+    re_path(
+        r"^stremio-addon/(?P<token>[^/]+)/player/"
+        r"(?P<media_type>movie|series)/(?P<media_id>[^/]+?)/"
+        r"(?P<extra>[^/]*)\.json$",
+        views.stremio_addon_player,
+        name="stremio_addon_player",
+    ),
+    re_path(
+        r"^stremio-addon/(?P<token>[^/]+)/c/(?P<config>[^/]+)/library/"
+        r"(?P<media_type>movie|series)/(?P<media_id>[^/]+?)/"
+        r"(?P<extra>[^/]*)\.json$",
+        views.stremio_addon_library,
+        name="stremio_addon_library_configured",
+    ),
+    re_path(
+        r"^stremio-addon/(?P<token>[^/]+)/library/"
+        r"(?P<media_type>movie|series)/(?P<media_id>[^/]+?)/"
+        r"(?P<extra>[^/]*)\.json$",
+        views.stremio_addon_library,
+        name="stremio_addon_library",
+    ),
 ]

@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import json
 import logging
+import os
 import re
 import secrets
 import zoneinfo
@@ -5064,17 +5065,35 @@ def kodi_webhook(request, token):
 STREMIO_ADDON_MANIFEST = {
     # Keep the existing addon id so installed clients remain compatible.
     "id": "org.yamtrack.scrobbler",
-    "version": "1.2.0",
+    "version": "1.3.0",
     "name": "Floppy",
     "description": (
         "Floppy Watchlist catalogs and playback scrobbling for Stremio."
     ),
-    "resources": ["catalog", "meta", "subtitles"],
+    # `player` and `library` are additive: a client that predates them parses
+    # the manifest, never matches the resource, and never calls the route.
+    "resources": ["catalog", "meta", "subtitles", "player", "library"],
     "types": ["movie", "series"],
     "idPrefixes": ["tt"],
     "catalogs": [],
     "behaviorHints": {"configurable": True, "configurationRequired": False},
 }
+# The player and library resources sit behind a kill switch so the manifest can
+# withdraw them without a code change. Only an explicit falsy value disables
+# them; declaring them is inert on clients that predate the resources.
+STREMIO_PLAYER_RESOURCES = ("player", "library")
+STREMIO_DISABLED_ENV_VALUES = {"0", "false", "no"}
+
+
+def _stremio_manifest_resources():
+    """Return the manifest resources, honoring the player/library kill switch."""
+    resources = list(STREMIO_ADDON_MANIFEST["resources"])
+    setting = os.environ.get("STREMIO_ENABLE_PLAYER_RESOURCE", "").strip().lower()
+    if setting in STREMIO_DISABLED_ENV_VALUES:
+        return [name for name in resources if name not in STREMIO_PLAYER_RESOURCES]
+    return resources
+
+
 STREMIO_SCROBBLE_THROTTLE_SECONDS = 1800
 STREMIO_MAX_MEDIA_ID_LENGTH = 128
 STREMIO_MEDIA_ID_PATTERN = re.compile(
@@ -5178,6 +5197,9 @@ def stremio_addon_manifest(request, token, config=None):
         "logo": request.build_absolute_uri(
             static("favicon/apple-touch-icon.png"),
         ),
+        # The kill switch withdraws the player/library resources from what
+        # clients see; the routes themselves are unconditional.
+        "resources": _stremio_manifest_resources(),
         # Both gates: the install URL picks the catalogs, the grant bounds them.
         "catalogs": stremio_catalog.manifest_catalogs_for_grant(
             user,
@@ -5299,6 +5321,42 @@ def stremio_addon_subtitles(request, token, media_type, media_id, config=None):
             )
 
     return _stremio_addon_response({"subtitles": []})
+
+
+@login_not_required
+@csrf_exempt
+@require_GET
+def stremio_addon_player(
+    request,
+    token,
+    media_type,
+    media_id,
+    extra=None,
+    config=None,
+):
+    """Accept a Stremio player event. Implemented in Task 6."""
+    user, _grant = stremio_catalog.resolve_addon_credential(token)
+    if user is None:
+        return _stremio_addon_response({"error": "Invalid token"}, status=401)
+    return _stremio_addon_response({"success": True})
+
+
+@login_not_required
+@csrf_exempt
+@require_GET
+def stremio_addon_library(
+    request,
+    token,
+    media_type,
+    media_id,
+    extra=None,
+    config=None,
+):
+    """Accept a Stremio library event. Implemented in Task 7."""
+    user, _grant = stremio_catalog.resolve_addon_credential(token)
+    if user is None:
+        return _stremio_addon_response({"error": "Invalid token"}, status=401)
+    return _stremio_addon_response({"success": True})
 
 
 @require_POST

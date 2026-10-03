@@ -124,7 +124,10 @@ class StremioAddonViewTests(TestCase):
         self.assertEqual(response["Access-Control-Allow-Origin"], "*")
         manifest = json.loads(response.content)
         self.assertEqual(manifest["id"], "org.yamtrack.scrobbler")
-        self.assertEqual(manifest["resources"], ["catalog", "meta", "subtitles"])
+        # Membership, not exact equality: an added resource must not break this,
+        # but a resource a client depends on disappearing must.
+        for resource in ("catalog", "meta", "subtitles"):
+            self.assertIn(resource, manifest["resources"])
         self.assertEqual(manifest["idPrefixes"], ["tt"])
         self.assertEqual(
             manifest["catalogs"],
