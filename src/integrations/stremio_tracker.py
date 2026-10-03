@@ -8,6 +8,7 @@ skips the write.
 
 import logging
 from dataclasses import dataclass
+from datetime import timedelta
 
 from django.db.models import Q
 
@@ -171,6 +172,49 @@ def new_session(video_id, started_at):
         "play_recorded": False,
         "settled": False,
     }
+
+
+_REWATCH_START_ACTIONS = frozenset({"start"})
+
+
+def session_for_observation(session, observation, *, now=None):
+    """Return the session this observation belongs to, starting a new one if needed.
+
+    Rule 3: a new session resets the position baseline and clears `completed`, so
+    a rewatch is counted as a fresh play instead of being pinned near the end by
+    the monotonic-position rule.
+    """
+    if session is None:
+        return new_session(
+            video_id=observation.video_id,
+            started_at=observation.observed_at,
+        )
+
+    if observation.video_id and observation.video_id != session.get("video_id"):
+        return new_session(
+            video_id=observation.video_id,
+            started_at=observation.observed_at,
+        )
+
+    if observation.action in _REWATCH_START_ACTIONS and session.get("settled"):
+        return new_session(
+            video_id=observation.video_id,
+            started_at=observation.observed_at,
+        )
+
+    last_event_at = session.get("last_event_at")
+    if (
+        session.get("settled")
+        and last_event_at is not None
+        and observation.observed_at
+        > last_event_at + timedelta(seconds=SESSION_GRACE_SECONDS)
+    ):
+        return new_session(
+            video_id=observation.video_id,
+            started_at=observation.observed_at,
+        )
+
+    return session
 
 
 def _is_stale(session, observation):

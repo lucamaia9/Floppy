@@ -177,3 +177,102 @@ class MergePolicyTests(SimpleTestCase):
 
         self.assertTrue(result.completed)
         self.assertTrue(result.record_play)
+
+    def _settle(self, session=None):
+        session = self.session if session is None else session
+        tracker.apply_observation(
+            session,
+            self._obs(
+                action="stop",
+                position_seconds=4500,
+                duration_seconds=6000,
+                watched=True,
+            ),
+        )
+        return session
+
+    def test_no_session_starts_one(self):
+        session = tracker.session_for_observation(None, self._obs())
+
+        self.assertEqual(session["video_id"], "tt1:1:2")
+
+    def test_start_after_settling_starts_a_new_session(self):
+        self._settle()
+        session = tracker.session_for_observation(self.session, self._obs())
+
+        self.assertIsNot(session, self.session)
+        self.assertFalse(session["completed"])
+        self.assertFalse(session["play_recorded"])
+
+    def test_changed_video_id_starts_a_new_session(self):
+        session = tracker.session_for_observation(
+            self.session,
+            self._obs(video_id="tt1:1:3"),
+        )
+
+        self.assertIsNot(session, self.session)
+        self.assertEqual(session["video_id"], "tt1:1:3")
+
+    def test_same_video_keeps_the_session(self):
+        session = tracker.session_for_observation(self.session, self._obs())
+
+        self.assertIs(session, self.session)
+
+    def test_settled_session_past_the_grace_window_starts_a_new_session(self):
+        self._settle()
+        session = tracker.session_for_observation(
+            self.session,
+            self._obs(
+                action="pause",
+                position_seconds=100,
+                duration_seconds=6000,
+                observed_at=self.now
+                + timedelta(seconds=tracker.SESSION_GRACE_SECONDS + 1),
+            ),
+        )
+
+        self.assertIsNot(session, self.session)
+
+    def test_settled_session_inside_the_grace_window_keeps_the_session(self):
+        self._settle()
+        session = tracker.session_for_observation(
+            self.session,
+            self._obs(
+                action="pause",
+                position_seconds=100,
+                duration_seconds=6000,
+                observed_at=self.now
+                + timedelta(seconds=tracker.SESSION_GRACE_SECONDS - 1),
+            ),
+        )
+
+        self.assertIs(session, self.session)
+
+    def test_rewatch_after_settling_appends_a_second_play(self):
+        """The user-visible requirement: a rewatch counts as a second play."""
+        first = tracker.apply_observation(
+            self.session,
+            self._obs(
+                action="stop",
+                position_seconds=4500,
+                duration_seconds=6000,
+                watched=True,
+            ),
+        )
+        session = tracker.session_for_observation(
+            self.session,
+            self._obs(action="start", observed_at=self.now + timedelta(hours=1)),
+        )
+        second = tracker.apply_observation(
+            session,
+            self._obs(
+                action="stop",
+                position_seconds=4500,
+                duration_seconds=6000,
+                watched=True,
+                observed_at=self.now + timedelta(hours=1),
+            ),
+        )
+
+        self.assertTrue(first.record_play)
+        self.assertTrue(second.record_play)
