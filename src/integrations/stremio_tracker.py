@@ -340,10 +340,15 @@ def apply_observation(session, observation):
 def play_external_id(media_id, video_id, session_started_at):
     """Build the deduplicating id for one session's play.
 
-    MoviePlay/Episode plays carry a unique constraint on (media, external_id),
-    so the database rejects a duplicate append even if the merge policy is
-    wrong. The session start time is what distinguishes a rewatch from a
-    repeated observation of the same watch.
+    The id is the session key: the app-level pre-check in `Movie.watch` and
+    `Season.watch` returns the existing play instead of appending a second one,
+    and the unique constraint on the play is the backstop — `(movie,
+    external_id)` for `MoviePlay`, `(related_season, item, external_id)` for
+    `Episode`.
+
+    `session_started_at` MUST be the session's start time, passed unchanged. A
+    `None` collapses the stamp to `''`, so every session of the same media
+    shares one id and a genuinely distinct session is silently deduped away.
     """
     stamp = ""
     if session_started_at is not None:

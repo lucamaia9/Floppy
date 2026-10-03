@@ -89,8 +89,45 @@ class PersistMergeResultTests(TestCase):
         self.assertTrue(recorded)
         self.assertEqual(self.movie.plays.count(), 1)
 
+    def test_completed_without_record_play_appends_nothing(self):
+        """The append is gated by record_play, not re-derived from completed.
+
+        Task 3 sets record_play only on the false->true transition, so a
+        repeated observation arrives completed=True with record_play=False and
+        must append nothing.
+        """
+        recorded = tracker.persist_merge_result(
+            self.user,
+            self.item,
+            self._result(completed=True, record_play=False, position_seconds=590),
+            media_id="tt500",
+            video_id=None,
+            session_started_at=timezone.now(),
+            ended_at=timezone.now(),
+        )
+
+        self.assertFalse(recorded)
+        self.assertEqual(self.movie.plays.count(), 0)
+
+    def test_none_item_is_a_noop(self):
+        self.assertFalse(
+            tracker.persist_merge_result(
+                self.user,
+                None,
+                self._result(completed=True, record_play=True),
+                media_id="tt500",
+                video_id=None,
+                session_started_at=timezone.now(),
+                ended_at=timezone.now(),
+            ),
+        )
+
     def test_replaying_the_same_session_does_not_append_twice(self):
-        """The external_id makes the append idempotent at the database level."""
+        """The append dedup is the app-level pre-check in the watch call.
+
+        The unique constraint on the play's external id is the backstop; the
+        id is the session key, so a replay of one session is not a second play.
+        """
         started = timezone.now()
         for _ in range(2):
             tracker.persist_merge_result(
@@ -240,7 +277,11 @@ class PersistMergeResultEpisodeTests(TestCase):
         self.assertEqual(self._plays(), 1)
 
     def test_replaying_the_same_episode_session_does_not_append_twice(self):
-        """The external_id makes the episode append idempotent in the database."""
+        """The episode append dedups on the external id, as the movie branch does.
+
+        The app-level pre-check in the watch call is the first line of defence;
+        the unique constraint is the backstop.
+        """
         started = timezone.now()
         for _ in range(2):
             self._persist(started)
