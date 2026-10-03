@@ -192,3 +192,35 @@ class ResolveMediaIdentityTests(TestCase):
         )
 
         self.assertEqual(resolved, item)
+
+    def test_out_of_range_video_id_returns_none_without_raising(self):
+        """A client-supplied video id must not bind an unbounded int into a query."""
+        with disable_fetch_releases():
+            series_item = Item.objects.create(
+                media_id="1399",
+                source=Sources.TMDB.value,
+                media_type=MediaTypes.TV.value,
+                provider_external_ids={"imdb_id": "tt400"},
+                title="Out Of Range",
+                image="",
+            )
+            TV.objects.create(
+                item=series_item,
+                user=self.user,
+                status=Status.PLANNING.value,
+            )
+
+        for video_id in (
+            "tt400:1:999999999999999999999999",
+            "tt400:0:1",
+            "tt400:1:0",
+        ):
+            with self.subTest(video_id=video_id):
+                self.assertIsNone(
+                    stremio_tracker.resolve_media_identity(
+                        self.user,
+                        "series",
+                        "tt400",
+                        video_id=video_id,
+                    ),
+                )

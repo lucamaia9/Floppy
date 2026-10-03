@@ -21,6 +21,10 @@ logger = logging.getLogger(__name__)
 # stremio-core. Only a sanity bound is needed here, not enforcement.
 VIDEO_ID_BATCH_LIMIT = 100
 
+# Bounds for a parsed video id's coordinates. A client supplies the video id, so
+# an out-of-range number must be rejected here rather than bound into a query.
+MAX_EPISODE_COORDINATE = 9999
+
 
 def _imdb_q(imdb_id):
     """Match an Item by IMDB id, whichever way it stores it.
@@ -108,5 +112,13 @@ def resolve_media_identity(user, media_type, media_id, video_id=None):
         return None
     # _parse_episode returns (series_id, season_number, episode_number).
     series_id, season_number, episode_number = parsed
+
+    if not (1 <= season_number <= MAX_EPISODE_COORDINATE) or not (
+        1 <= episode_number <= MAX_EPISODE_COORDINATE
+    ):
+        logger.info(
+            "stremio_tracker status=unresolved reason=out_of_range_video_id",
+        )
+        return None
 
     return _episode_item(user, series_id, season_number, episode_number)
