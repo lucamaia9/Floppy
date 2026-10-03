@@ -14,11 +14,14 @@ class ResolveMediaIdentityTests(TestCase):
         self.user = User.objects.create_user(username="identity", password="x")
 
     def test_movie_resolves_directly(self):
+        # How the Stremio importer stores a movie: numeric TMDB media_id, the
+        # IMDB id (which is what Stremio sends) in provider_external_ids.
         with disable_fetch_releases():
             item = Item.objects.create(
-                media_id="tt100",
+                media_id="603",
                 source=Sources.TMDB.value,
                 media_type=MediaTypes.MOVIE.value,
+                provider_external_ids={"imdb_id": "tt100"},
                 title="A Movie",
                 image="",
             )
@@ -45,9 +48,10 @@ class ResolveMediaIdentityTests(TestCase):
     def test_series_without_video_id_resolves_the_series(self):
         with disable_fetch_releases():
             item = Item.objects.create(
-                media_id="tt200",
+                media_id="1399",
                 source=Sources.TMDB.value,
                 media_type=MediaTypes.TV.value,
+                provider_external_ids={"imdb_id": "tt200"},
                 title="A Series",
                 image="",
             )
@@ -73,9 +77,10 @@ class ResolveMediaIdentityTests(TestCase):
         """
         with disable_fetch_releases():
             item = Item.objects.create(
-                media_id="tt300",
+                media_id="1399",
                 source=Sources.TMDB.value,
                 media_type=MediaTypes.TV.value,
+                provider_external_ids={"imdb_id": "tt300"},
                 title="Another Series",
                 image="",
             )
@@ -108,9 +113,10 @@ class ResolveMediaIdentityTests(TestCase):
         """Episode Items are keyed by series media_id + season/episode fields."""
         with disable_fetch_releases():
             series_item = Item.objects.create(
-                media_id="tt400",
+                media_id="1399",
                 source=Sources.TMDB.value,
                 media_type=MediaTypes.TV.value,
+                provider_external_ids={"imdb_id": "tt400"},
                 title="Episode Series",
                 image="",
             )
@@ -120,7 +126,7 @@ class ResolveMediaIdentityTests(TestCase):
                 status=Status.PLANNING.value,
             )
             season_item = Item.objects.create(
-                media_id="tt400",
+                media_id="1399",
                 source=Sources.TMDB.value,
                 media_type=MediaTypes.SEASON.value,
                 season_number=1,
@@ -134,7 +140,7 @@ class ResolveMediaIdentityTests(TestCase):
                 status=Status.PLANNING.value,
             )
             episode_item = Item.objects.create(
-                media_id="tt400",
+                media_id="1399",
                 source=Sources.TMDB.value,
                 media_type=MediaTypes.EPISODE.value,
                 season_number=1,
@@ -162,3 +168,27 @@ class ResolveMediaIdentityTests(TestCase):
         )
 
         self.assertEqual(resolved, episode_item)
+
+    def test_imdb_source_item_resolves_by_media_id(self):
+        """Some Items carry the IMDB id as media_id instead; both must match."""
+        with disable_fetch_releases():
+            item = Item.objects.create(
+                media_id="tt999",
+                source=Sources.IMDB.value,
+                media_type=MediaTypes.MOVIE.value,
+                title="An IMDB Movie",
+                image="",
+            )
+            Movie.objects.create(
+                item=item,
+                user=self.user,
+                status=Status.PLANNING.value,
+            )
+
+        resolved = stremio_tracker.resolve_media_identity(
+            self.user,
+            "movie",
+            "tt999",
+        )
+
+        self.assertEqual(resolved, item)

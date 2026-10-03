@@ -8,6 +8,8 @@ skips the write.
 
 import logging
 
+from django.db.models import Q
+
 from app.models import Item
 from app.models.choices import MediaTypes, Sources
 
@@ -20,13 +22,24 @@ logger = logging.getLogger(__name__)
 VIDEO_ID_BATCH_LIMIT = 100
 
 
-def _movie_item(user, media_id):
+def _imdb_q(imdb_id):
+    """Match an Item by IMDB id, whichever way it stores it.
+
+    A Stremio id is an IMDB tt id. Items sourced directly from IMDB carry it as
+    media_id; TMDB-sourced Items carry it in provider_external_ids — and those
+    are what the Stremio importer creates.
+    """
+    return Q(source=Sources.IMDB.value, media_id=imdb_id) | Q(
+        provider_external_ids__imdb_id=imdb_id,
+    )
+
+
+def _movie_item(user, imdb_id):
     # Movie.item has no explicit related_name, so the reverse accessor is the
     # default `movie`.
     return (
         Item.objects.filter(
-            media_id=media_id,
-            source=Sources.TMDB.value,
+            _imdb_q(imdb_id),
             media_type=MediaTypes.MOVIE.value,
             movie__user=user,
         )
@@ -35,11 +48,10 @@ def _movie_item(user, media_id):
     )
 
 
-def _series_item(user, media_id):
+def _series_item(user, imdb_id):
     return (
         Item.objects.filter(
-            media_id=media_id,
-            source=Sources.TMDB.value,
+            _imdb_q(imdb_id),
             media_type=MediaTypes.TV.value,
             tv__user=user,
         )
@@ -48,16 +60,19 @@ def _series_item(user, media_id):
     )
 
 
-def _episode_item(user, series_id, season_number, episode_number):
-    """Find the episode Item by its coordinate fields.
+def _episode_item(user, series_imdb_id, season_number, episode_number):
+    """Find the episode Item under the resolved series.
 
     Episode Items are keyed by the *series* media_id plus season_number and
-    episode_number — they do not carry a composite `tt123:1:2` media_id.
+    episode_number — they do not carry a composite tt123:1:2 media_id.
     """
+    series_item = _series_item(user, series_imdb_id)
+    if series_item is None:
+        return None
     return (
         Item.objects.filter(
-            media_id=series_id,
-            source=Sources.TMDB.value,
+            media_id=series_item.media_id,
+            source=series_item.source,
             media_type=MediaTypes.EPISODE.value,
             season_number=season_number,
             episode_number=episode_number,
