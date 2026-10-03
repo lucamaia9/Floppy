@@ -1,0 +1,44 @@
+name: Upstream sync proposal
+
+on:
+  schedule:
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  propose:
+    if: github.repository_owner == 'lucamaia9'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out fork latest
+        uses: actions/checkout@v4
+        with:
+          ref: latest
+          fetch-depth: 0
+
+      - name: Merge upstream latest into a proposal branch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream https://github.com/dannyvfilms/Floppy.git
+          git fetch upstream latest
+          git switch -c automation/upstream-latest-sync
+          git merge --no-edit upstream/latest
+
+      - name: Open or update sync PR
+        uses: peter-evans/create-pull-request@v7
+        with:
+          branch: automation/upstream-latest-sync
+          base: latest
+          title: "chore: propose upstream latest sync"
+          commit-message: "chore: sync upstream latest"
+          body: |
+            Automated proposal from `dannyvfilms/Floppy` `latest`.
+
+            Review conflicts and product behavior manually before promotion to
+            the downstream production branch. This workflow does not deploy.
+          delete-branch: true
