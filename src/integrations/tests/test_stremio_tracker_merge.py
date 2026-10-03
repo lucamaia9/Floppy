@@ -63,7 +63,11 @@ class MergePolicyTests(SimpleTestCase):
         self.assertEqual(result.position_seconds, 3000)
 
     def test_late_poll_does_not_rewind_position(self):
-        """The 90s push throttle means a poll can carry an older position."""
+        """The 90s push throttle means a poll can carry a stale position.
+
+        The poll's position is HIGHER than the session's, so this only passes if
+        the staleness guard actually rejects it — max() alone would return 5000.
+        """
         tracker.apply_observation(
             self.session,
             self._obs(action="pause", position_seconds=3000, duration_seconds=6000),
@@ -73,13 +77,89 @@ class MergePolicyTests(SimpleTestCase):
             self._obs(
                 source="poll",
                 action="observed",
-                position_seconds=2000,
+                position_seconds=5000,
                 duration_seconds=6000,
-                observed_at=self.now - timedelta(seconds=120),
+                observed_at=self.now - timedelta(seconds=300),
             ),
         )
 
         self.assertEqual(result.position_seconds, 3000)
+
+    def test_stale_stop_does_not_settle(self):
+        tracker.apply_observation(
+            self.session,
+            self._obs(action="pause", position_seconds=1000, duration_seconds=6000),
+        )
+        result = tracker.apply_observation(
+            self.session,
+            self._obs(
+                action="stop",
+                position_seconds=2000,
+                duration_seconds=6000,
+                observed_at=self.now - timedelta(seconds=300),
+            ),
+        )
+
+        self.assertFalse(result.settled)
+
+    def test_stale_poll_may_set_watched_but_not_position(self):
+        """Rule 1's asymmetry: the flag owns watched-ness; it does not own position."""
+        result = tracker.apply_observation(
+            self.session,
+            self._obs(
+                source="poll",
+                action="observed",
+                position_seconds=5000,
+                duration_seconds=6000,
+                watched=True,
+                observed_at=self.now - timedelta(seconds=300),
+            ),
+        )
+
+        self.assertTrue(result.completed)
+        self.assertIsNone(result.position_seconds)
+
+    def test_observation_inside_the_skew_tolerance_is_not_stale(self):
+        """A retry arriving just before last_event_at is skew, not disorder."""
+        tracker.apply_observation(
+            self.session,
+            self._obs(action="pause", position_seconds=1000, duration_seconds=6000),
+        )
+        result = tracker.apply_observation(
+            self.session,
+            self._obs(
+                action="pause",
+                position_seconds=2000,
+                duration_seconds=6000,
+                observed_at=self.now - timedelta(seconds=60),
+            ),
+        )
+
+        self.assertEqual(result.position_seconds, 2000)
+
+    def test_stale_pause_after_completion_keeps_it(self):
+        """Rule 4 holds against a stale, non-asserting in-progress observation."""
+        tracker.apply_observation(
+            self.session,
+            self._obs(
+                action="stop",
+                position_seconds=4500,
+                duration_seconds=6000,
+                watched=True,
+            ),
+        )
+        result = tracker.apply_observation(
+            self.session,
+            self._obs(
+                action="pause",
+                position_seconds=100,
+                duration_seconds=6000,
+                watched=None,
+                observed_at=self.now - timedelta(seconds=300),
+            ),
+        )
+
+        self.assertTrue(result.completed)
 
     def test_completion_is_sticky_against_in_progress_observations(self):
         tracker.apply_observation(
@@ -178,6 +258,28 @@ class MergePolicyTests(SimpleTestCase):
         self.assertTrue(result.completed)
         self.assertTrue(result.record_play)
 
+    def test_flag_bearing_not_watched_clears_completion(self):
+        """The three-state contract: an explicit False assertion clears.
+
+        Stremio's flag is time_watched-based, so it can legitimately disagree
+        with a position-based provisional completion. The flag wins.
+        """
+        tracker.apply_observation(
+            self.session,
+            self._obs(
+                action="stop",
+                position_seconds=4500,
+                duration_seconds=6000,
+                watched=True,
+            ),
+        )
+        result = tracker.apply_observation(
+            self.session,
+            self._obs(source="poll", action="observed", watched=False),
+        )
+
+        self.assertFalse(result.completed)
+
     def _settle(self, session=None):
         session = self.session if session is None else session
         tracker.apply_observation(
@@ -212,6 +314,23 @@ class MergePolicyTests(SimpleTestCase):
 
         self.assertIsNot(session, self.session)
         self.assertEqual(session["video_id"], "tt1:1:3")
+
+    def test_reset_from_a_none_video_id_observation_keeps_the_session_video_id(self):
+        tracker.apply_observation(
+            self.session,
+            self._obs(
+                action="stop",
+                position_seconds=4500,
+                duration_seconds=6000,
+                watched=True,
+            ),
+        )
+        fresh = tracker.session_for_observation(
+            self.session,
+            self._obs(action="start", video_id=None),
+        )
+
+        self.assertEqual(fresh["video_id"], "tt1:1:2")
 
     def test_same_video_keeps_the_session(self):
         session = tracker.session_for_observation(self.session, self._obs())

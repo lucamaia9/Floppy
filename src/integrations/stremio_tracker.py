@@ -130,6 +130,11 @@ def resolve_media_identity(user, media_type, media_id, video_id=None):
 # status purposes. The flag may still be applied.
 SESSION_GRACE_SECONDS = 600
 
+# Sources are polled independently and a retry can arrive with an
+# `observed_at` slightly before the last applied event. Within this window the
+# ordering is treated as clock skew, not as a stale observation.
+SESSION_CLOCK_SKEW_SECONDS = 120
+
 _TERMINAL_ACTIONS = frozenset({"stop"})
 _CLEAR_ACTIONS = frozenset({"unwatched", "libraryRemove"})
 
@@ -183,6 +188,19 @@ def session_for_observation(session, observation, *, now=None):
     Rule 3: a new session resets the position baseline and clears `completed`, so
     a rewatch is counted as a fresh play instead of being pinned near the end by
     the monotonic-position rule.
+
+    A new session is also started when an observation arrives more than
+    SESSION_GRACE_SECONDS after the last applied event of a settled session.
+    That trigger is gated on `settled` deliberately: without the gate, any
+    observation later than the grace window would start a new session, so a
+    long pause mid-episode would clear `play_recorded` and the eventual `stop`
+    would append a second play for the same viewing.
+
+    Callers MUST use the returned session: the input is never mutated, and a
+    new session object is returned whenever a boundary is crossed.
+
+    `now` is accepted for signature symmetry with the callers' clock and does
+    not participate in the decision; ordering uses `observation.observed_at`.
     """
     if session is None:
         return new_session(
@@ -192,13 +210,13 @@ def session_for_observation(session, observation, *, now=None):
 
     if observation.video_id and observation.video_id != session.get("video_id"):
         return new_session(
-            video_id=observation.video_id,
+            video_id=observation.video_id or session.get("video_id"),
             started_at=observation.observed_at,
         )
 
     if observation.action in _REWATCH_START_ACTIONS and session.get("settled"):
         return new_session(
-            video_id=observation.video_id,
+            video_id=observation.video_id or session.get("video_id"),
             started_at=observation.observed_at,
         )
 
@@ -210,7 +228,7 @@ def session_for_observation(session, observation, *, now=None):
         > last_event_at + timedelta(seconds=SESSION_GRACE_SECONDS)
     ):
         return new_session(
-            video_id=observation.video_id,
+            video_id=observation.video_id or session.get("video_id"),
             started_at=observation.observed_at,
         )
 
@@ -218,18 +236,41 @@ def session_for_observation(session, observation, *, now=None):
 
 
 def _is_stale(session, observation):
-    """Return whether an observation predates the session's last applied one."""
+    """Return whether an observation predates the session's last applied one.
+
+    An observation up to SESSION_CLOCK_SKEW_SECONDS before the last applied
+    event is treated as fresh: independent sources can report the same event
+    with slightly different timestamps.
+    """
     last = session.get("last_event_at")
     if last is None:
         return False
-    return observation.observed_at < last
+    return observation.observed_at < last - timedelta(
+        seconds=SESSION_CLOCK_SKEW_SECONDS
+    )
 
 
 def apply_observation(session, observation):
     """Fold one observation into a session and report the effects.
 
-    Pure: mutates `session` in place and returns what the caller should write.
+    Mutates `session` in place and returns what the caller should persist.
     Rules, in precedence order, are documented in the spec §5.
+
+    `Observation.watched` is a three-state contract, and the distinction is
+    load-bearing:
+
+    * ``True`` asserts the media is watched.
+    * ``False`` asserts it is NOT watched, and clears a completed session. The
+      flag is authoritative, so an explicit ``False`` overrides a provisional
+      completion: Stremio derives the flag from accumulated watch *time*
+      (``time_watched > duration * 0.7``), which can legitimately disagree with
+      a position-based completion, and the flag wins.
+    * ``None`` means the source holds no assertion about watched-ness. It never
+      changes completion in either direction.
+
+    Callers that merely lack a flag MUST pass ``None``, not ``False``: a
+    ``False`` is an assertion that unwatches the media and clears the session's
+    completion, so passing it for "unknown" silently destroys state.
     """
     stale = _is_stale(session, observation)
 
@@ -274,7 +315,8 @@ def apply_observation(session, observation):
         ):
             session["last_event_at"] = observation.observed_at
 
-    # Rule 4: completion is sticky — `watched` above may only ever raise it.
+    # Rule 4: completion persists otherwise. A `watched` assertion above may
+    # raise OR clear it; no other rule may change it.
     completed = bool(session.get("completed"))
 
     # Rule 5: a play is appended only on the false->true transition.
