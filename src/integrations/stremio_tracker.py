@@ -9,6 +9,7 @@ skips the write.
 import logging
 from dataclasses import dataclass
 from datetime import timedelta
+from urllib.parse import unquote
 
 from django.db import transaction
 from django.db.models import Q
@@ -17,6 +18,7 @@ from django.utils import timezone
 from app.models import Episode, Item, Movie, PlaybackProgress
 from app.models.choices import MediaTypes, Sources
 
+from .stremio_events import parse_player_extra
 from .stremio_playback import _parse_episode
 
 logger = logging.getLogger(__name__)
@@ -28,6 +30,14 @@ VIDEO_ID_BATCH_LIMIT = 100
 # Bounds for a parsed video id's coordinates. A client supplies the video id, so
 # an out-of-range number must be rejected here rather than bound into a query.
 MAX_EPISODE_COORDINATE = 9999
+
+# Stremio flags a title watched above this fraction of its duration
+# (WATCHED_THRESHOLD_COEF in stremio-core). Used only as the provisional for a
+# player `stop`; the library flag is the authoritative signal.
+WATCHED_THRESHOLD_COEF = 0.7
+
+# A session is short-lived; the poller reconciles anything that outlives it.
+_SESSION_TTL_SECONDS = 6 * 60 * 60
 
 
 def _imdb_q(imdb_id):
@@ -426,3 +436,96 @@ def persist_merge_result(
             play_external_id(media_id, video_id, session_started_at),
             ended_at,
         )
+
+
+def _session_key(user_id, media_type, media_id, video_id):
+    return f"stremio_tracker_v1:{user_id}:{media_type}:{media_id}:{video_id or ''}"
+
+
+def _load_session(user_id, media_type, media_id, video_id, now):
+    """Return `(key, session)` for one media identity, starting one if absent.
+
+    The cached session is the raw stored value; callers MUST still pass it
+    through `session_for_observation` to cross a session boundary.
+    """
+    from django.core.cache import cache
+
+    key = _session_key(user_id, media_type, media_id, video_id)
+    session = cache.get(key)
+    if session is None:
+        session = new_session(video_id=video_id, started_at=now)
+    return key, session
+
+
+def _looks_complete(event):
+    """Return whether a `stop` position clears Stremio's watched threshold.
+
+    Deliberately not `is_played()`, which requires the final 30 seconds and
+    would drop every completion between 70% and the credits.
+    """
+    if not event.duration_seconds:
+        return False
+    return event.position_seconds >= event.duration_seconds * WATCHED_THRESHOLD_COEF
+
+
+def record_player_event(user, media_type, media_id, extra, *, now=None):
+    """Handle one `player` event: parse, resolve, merge, persist.
+
+    Returns a status string for logging and tests.
+    """
+    from django.core.cache import cache
+
+    event = parse_player_extra(extra)
+    if event is None:
+        logger.info("stremio_tracker status=invalid_extra source=player")
+        return "invalid_extra"
+
+    media_id = unquote(media_id)
+    now = now or timezone.now()
+
+    # The player path id is already the video id for an episode (`tt123:1:2`),
+    # so the series id is its prefix; a movie id is the id.
+    video_id = media_id if media_type == "series" and ":" in media_id else None
+    series_id = media_id.split(":")[0] if video_id else media_id
+
+    item = resolve_media_identity(user, media_type, series_id, video_id)
+    if item is None:
+        logger.info(
+            "stremio_tracker status=unresolved_media source=player media_type=%s",
+            media_type,
+        )
+        return "unresolved_media"
+
+    # `watched` is three-state. Only a threshold-meeting stop is a positive
+    # signal; everything else is None, never False, which would assert the
+    # media is NOT watched and clear a session the flag already completed.
+    watched = None
+    if event.action == "stop" and _looks_complete(event):
+        watched = True
+
+    observation = Observation(
+        source="player",
+        action=event.action,
+        position_seconds=event.position_seconds,
+        duration_seconds=event.duration_seconds,
+        watched=watched,
+        observed_at=now,
+        video_id=video_id,
+    )
+    key, session = _load_session(user.id, media_type, series_id, video_id, now)
+    # The returned session is the one that carries the boundary: a rewatch
+    # starts a fresh session and must not reuse the settled one.
+    session = session_for_observation(session, observation, now=now)
+    result = apply_observation(session, observation)
+
+    persist_merge_result(
+        user,
+        item,
+        result,
+        media_id=series_id,
+        video_id=video_id,
+        session_started_at=session.get("started_at"),
+        ended_at=now,
+    )
+    cache.set(key, session, timeout=_SESSION_TTL_SECONDS)
+    return "recorded"
