@@ -256,6 +256,25 @@ def _milliseconds_to_seconds(value):
     except (TypeError, ValueError):
         return None
 
+def _watched_assertion(*values):
+    """Return True/False from Stremio's watched fields, or None when absent.
+
+    Stremio records watched-ness in two places — `timesWatched` (a count) and
+    `flaggedWatched` (the manual flag) — and the repo's importer reads them as a
+    union (`integrations/imports/stremio.py`).  A value that cannot be parsed is
+    treated as absent: asserting False would clear a completed session, and only
+    the client can know it did not.
+    """
+    usable = []
+    for value in values:
+        try:
+            usable.append(float(value))
+        except (TypeError, ValueError):
+            continue
+    if not usable:
+        return None
+    return any(number > 0 for number in usable)
+
 def poll_observation_from_state(media_type, media_id, entry):
     """Build one tracker Observation from a cloud-library entry, or None.
 
@@ -266,13 +285,16 @@ def poll_observation_from_state(media_type, media_id, entry):
     `observed_at` is stamped with OUR clock, not Stremio's `lastWatched`.
     Ordering compares observations across sources, and player events are
     stamped with server receive time, so a Stremio-domain timestamp is not
-    comparable.  `lastWatched` stays data — the library event path uses it for
-    the session-boundary grace check — but it is never the ordering stamp.
+    comparable.  `lastWatched` stays data — the poller's own session-evidence
+    and auto-next checks read it — but it is never the ordering stamp.
 
-    `watched` is three-state, read from Stremio's own `flaggedWatched` rather
-    than re-derived from `time_watched > duration * 0.7`: an explicit zero is a
-    real assertion that clears a completed session, and a missing key asserts
-    nothing and stays None.
+    `watched` is three-state, read from Stremio's own `timesWatched` and
+    `flaggedWatched` as a union rather than re-derived from
+    `time_watched > duration * 0.7`: a naturally-completed item carries only
+    `timesWatched`, so reading the manual flag alone would assert False and
+    clear the completed session.  When every usable field is zero the client is
+    explicitly asserting not-watched; when no field is usable nothing is
+    asserted and the value stays None.
 
     DO NOT wire this into the merge point while
     `integrations.tasks._webhook.verify_stremio_playback` still calls
@@ -283,30 +305,29 @@ def poll_observation_from_state(media_type, media_id, entry):
     state = entry.get("state") if isinstance(entry, dict) else None
     if not isinstance(state, dict):
         logger.info(
-            "stremio_poll status=unusable media_type=%s media_id=%s reason=missing_state",
+            "stremio_poll status=unusable media_type=%s reason=missing_state",
             media_type,
-            media_id,
         )
         return None
 
     duration_seconds = _milliseconds_to_seconds(state.get("duration"))
     if not duration_seconds:
         logger.info(
-            "stremio_poll status=unusable media_type=%s media_id=%s reason=missing_duration",
+            "stremio_poll status=unusable media_type=%s reason=missing_duration",
             media_type,
-            media_id,
         )
         return None
 
     from integrations import stremio_tracker
 
-    flagged = state.get("flaggedWatched")
     return stremio_tracker.Observation(
         source="poll",
         action="observed",
         position_seconds=_milliseconds_to_seconds(state.get("timeOffset")),
         duration_seconds=duration_seconds,
-        watched=None if flagged is None else bool(_float(flagged)),
+        watched=_watched_assertion(
+            state.get("timesWatched"), state.get("flaggedWatched")
+        ),
         observed_at=timezone.now(),
         video_id=(state.get("video_id") or None) if media_type == "series" else None,
     )

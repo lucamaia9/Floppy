@@ -83,6 +83,48 @@ class PollObservationTests(SimpleTestCase):
 
         self.assertIsNone(observation.watched)
 
+    def test_times_watched_alone_reads_as_watched(self):
+        """A naturally-completed item carries timesWatched and no manual flag.
+
+        Reading flaggedWatched alone would assert False here and clear the
+        completed session.
+        """
+        observation = stremio_playback.poll_observation_from_state(
+            "movie",
+            "tt500",
+            {"state": {"duration": 600000, "timeWatched": 600000, "timesWatched": 1}},
+        )
+
+        self.assertTrue(observation.watched)
+
+    def test_zero_manual_flag_does_not_override_a_completed_count(self):
+        observation = stremio_playback.poll_observation_from_state(
+            "movie",
+            "tt500",
+            {"state": {"duration": 600000, "timesWatched": 1, "flaggedWatched": 0}},
+        )
+
+        self.assertTrue(observation.watched)
+
+    def test_both_fields_zero_asserts_not_watched(self):
+        observation = stremio_playback.poll_observation_from_state(
+            "movie",
+            "tt500",
+            {"state": {"duration": 600000, "timesWatched": 0, "flaggedWatched": 0}},
+        )
+
+        self.assertFalse(observation.watched)
+
+    def test_an_unparseable_flag_asserts_nothing(self):
+        """An unusable value is absent, never False — False clears state."""
+        observation = stremio_playback.poll_observation_from_state(
+            "movie",
+            "tt500",
+            {"state": {"duration": 600000, "flaggedWatched": "junk"}},
+        )
+
+        self.assertIsNone(observation.watched)
+
     def test_series_entry_carries_the_video_id(self):
         observation = stremio_playback.poll_observation_from_state(
             "series",
