@@ -99,12 +99,13 @@ class InvalidMediaIdTests(TestCase):
         handler.assert_not_called()
 
     def test_library_route_rejects_an_invalid_media_id(self):
+        # Episode 0 does not exist, so `tt1:1:0` is genuinely malformed.
         url = reverse(
             "stremio_addon_library",
             kwargs={
                 "token": self.user.token,
                 "media_type": "series",
-                "media_id": "tt1%3A0%3A2",
+                "media_id": "tt1%3A1%3A0",
                 "extra": "action=watched",
             },
         )
@@ -114,6 +115,38 @@ class InvalidMediaIdTests(TestCase):
 
         self.assertEqual(response.status_code, 400)
         handler.assert_not_called()
+
+    def test_routes_accept_season_zero_specials(self):
+        """Season 0 is Stremio's specials bucket; the guard must not reject it.
+
+        It did, which silently dropped every special before it reached the
+        tracker.
+        """
+        for route, handler_name in (
+            ("stremio_addon_library", "record_library_event"),
+            ("stremio_addon_player", "record_player_event"),
+        ):
+            with self.subTest(route=route):
+                extra = (
+                    "action=watched"
+                    if route == "stremio_addon_library"
+                    else "action=pause&currentTime=1000&duration=2000"
+                )
+                url = reverse(
+                    route,
+                    kwargs={
+                        "token": self.user.token,
+                        "media_type": "series",
+                        "media_id": "tt1%3A0%3A2",
+                        "extra": extra,
+                    },
+                )
+
+                with patch.object(views.stremio_tracker, handler_name) as handler:
+                    response = self.client.get(url)
+
+                self.assertEqual(response.status_code, 200)
+                handler.assert_called_once()
 
 
 class PlayerResourceGateTests(TestCase):

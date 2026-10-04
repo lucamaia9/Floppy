@@ -275,6 +275,11 @@ def _watched_assertion(*values):
         return None
     return any(number > 0 for number in usable)
 
+# Stremio's cloud library labels a show `tv`; the addon protocol and the rest of
+# Floppy say `series`. 175 of 882 live library entries are `tv`, so without this
+# map a poller reading the library directly would skip every show.
+_LIBRARY_MEDIA_TYPES = {"tv": "series"}
+
 def poll_observation_from_state(media_type, media_id, entry):
     """Build one tracker Observation from a cloud-library entry, or None.
 
@@ -310,10 +315,10 @@ def poll_observation_from_state(media_type, media_id, entry):
         )
         return None
 
-    duration_seconds = _milliseconds_to_seconds(state.get("duration"))
-    if not duration_seconds:
+    media_type = _LIBRARY_MEDIA_TYPES.get(media_type, media_type)
+    if media_type not in {"movie", "series"}:
         logger.info(
-            "stremio_poll status=unusable media_type=%s reason=missing_duration",
+            "stremio_poll status=unusable media_type=%s reason=unsupported_media_type",
             media_type,
         )
         return None
@@ -323,8 +328,13 @@ def poll_observation_from_state(media_type, media_id, entry):
     return stremio_tracker.Observation(
         source="poll",
         action="observed",
-        position_seconds=_milliseconds_to_seconds(state.get("timeOffset")),
-        duration_seconds=duration_seconds,
+        # A zero offset means "no resume point", not "resume at 0": storing 0
+        # would overwrite a real position. The same applies to a zero duration,
+        # which is why neither is treated as a value. A missing duration no
+        # longer discards the observation — `persist_merge_result` preserves a
+        # stored duration when the observation carries none.
+        position_seconds=_milliseconds_to_seconds(state.get("timeOffset")) or None,
+        duration_seconds=_milliseconds_to_seconds(state.get("duration")) or None,
         watched=_watched_assertion(
             state.get("timesWatched"), state.get("flaggedWatched")
         ),

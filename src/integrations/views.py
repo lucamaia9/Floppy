@@ -5098,7 +5098,10 @@ def _stremio_manifest_resources():
 STREMIO_SCROBBLE_THROTTLE_SECONDS = 1800
 STREMIO_MAX_MEDIA_ID_LENGTH = 128
 STREMIO_MEDIA_ID_PATTERN = re.compile(
-    r"^tt[0-9]+(?::[1-9][0-9]*:[1-9][0-9]*)?$",
+    # Season 0 is Stremio's specials bucket; episodes start at 1. Both bounds
+    # mirror MAX_EPISODE_COORDINATE so the route and the tracker agree on what
+    # is malformed.
+    r"^tt[0-9]+(?::[0-9]{1,4}:[1-9][0-9]{0,3})?$",
 )
 
 

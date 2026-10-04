@@ -1127,7 +1127,12 @@ class StremioImporter:
                 trakt_id,
                 media_type=media_type,
             )
-        except services.ProviderAPIError as error:
+        except (services.ProviderAPIError, requests.exceptions.RequestException) as error:
+            # `services.api_request` re-raises a non-retryable HTTP status (403,
+            # 404) as a raw `requests.HTTPError`, not a `ProviderAPIError`, so
+            # catching only the latter let one unresolvable id abort the whole
+            # import. Trakt answers 403 on its paid tier, and two library
+            # entries are `trakt:`-namespaced.
             logger.warning("Error looking up Trakt ID %s: %s", trakt_id, error)
             return None
         if not result:

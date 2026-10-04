@@ -153,12 +153,52 @@ class PollObservationTests(SimpleTestCase):
         self.assertEqual(observation.source, "poll")
         self.assertEqual(observation.action, "observed")
 
-    def test_zero_duration_is_none(self):
+    def test_zero_duration_does_not_discard_the_observation(self):
+        """29 live entries carry a resume offset with no duration.
+
+        Discarding them lost the position entirely; `persist_merge_result`
+        preserves a stored duration when the observation carries none, so the
+        observation is still worth emitting.
+        """
+        observation = stremio_playback.poll_observation_from_state(
+            "movie",
+            "tt1",
+            self._entry(timeOffset=2550872, duration=0),
+        )
+
+        self.assertIsNone(observation.duration_seconds)
+        self.assertEqual(observation.position_seconds, 2550)
+
+    def test_zero_offset_is_absent_not_a_resume_at_zero(self):
+        """Storing 0 would overwrite a real position with the start of the film."""
+        observation = stremio_playback.poll_observation_from_state(
+            "movie",
+            "tt1",
+            self._entry(timeOffset=0),
+        )
+
+        self.assertIsNone(observation.position_seconds)
+
+    def test_library_tv_type_is_mapped_to_series(self):
+        """Stremio labels shows `tv`; the addon protocol and Floppy say `series`.
+
+        175 of 882 live library entries are `tv`, so a poller reading the
+        library directly would otherwise skip every show.
+        """
+        observation = stremio_playback.poll_observation_from_state(
+            "tv",
+            "tt1",
+            self._entry(video_id="tt1:1:1"),
+        )
+
+        self.assertEqual(observation.video_id, "tt1:1:1")
+
+    def test_unsupported_media_type_is_none(self):
         self.assertIsNone(
             stremio_playback.poll_observation_from_state(
-                "movie",
-                "tt1",
-                self._entry(duration=0),
+                "channel",
+                "bt1",
+                self._entry(),
             ),
         )
 

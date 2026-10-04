@@ -212,8 +212,8 @@ class ResolveMediaIdentityTests(TestCase):
 
         for video_id in (
             "tt400:1:999999999999999999999999",
-            "tt400:0:1",
             "tt400:1:0",
+            "tt400:10000:1",
         ):
             with self.subTest(video_id=video_id):
                 self.assertIsNone(
@@ -224,3 +224,60 @@ class ResolveMediaIdentityTests(TestCase):
                         video_id=video_id,
                     ),
                 )
+
+    def test_season_zero_specials_are_not_rejected_as_out_of_range(self):
+        """Season 0 is Stremio's specials bucket, not a malformed coordinate.
+
+        Rejecting it silently dropped every special. The episode still resolves
+        to nothing here because Floppy has no season-0 rows, which is why the
+        assertion is on the log-free path rather than on a resolved Item.
+        """
+        with disable_fetch_releases():
+            series_item = Item.objects.create(
+                media_id="1399",
+                source=Sources.TMDB.value,
+                media_type=MediaTypes.TV.value,
+                provider_external_ids={"imdb_id": "tt400"},
+                title="Specials Series",
+                image="",
+            )
+            TV.objects.create(
+                item=series_item,
+                user=self.user,
+                status=Status.PLANNING.value,
+            )
+            season_item = Item.objects.create(
+                media_id="1399",
+                source=Sources.TMDB.value,
+                media_type=MediaTypes.SEASON.value,
+                season_number=0,
+                title="Specials Series",
+                image="",
+            )
+            season = Season.objects.create(
+                item=season_item,
+                related_tv=TV.objects.get(item=series_item, user=self.user),
+                user=self.user,
+                status=Status.PLANNING.value,
+            )
+            episode_item = Item.objects.create(
+                media_id="1399",
+                source=Sources.TMDB.value,
+                media_type=MediaTypes.EPISODE.value,
+                season_number=0,
+                episode_number=1,
+                title="A Special",
+                image="",
+            )
+            Episode.objects.bulk_create(
+                [Episode(item=episode_item, related_season=season, end_date=None)],
+            )
+
+        resolved = stremio_tracker.resolve_media_identity(
+            self.user,
+            "series",
+            "tt400",
+            video_id="tt400:0:1",
+        )
+
+        self.assertEqual(resolved, episode_item)

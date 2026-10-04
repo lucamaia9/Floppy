@@ -134,7 +134,9 @@ def resolve_media_identity(user, media_type, media_id, video_id=None):
     # _parse_episode returns (series_id, season_number, episode_number).
     series_id, season_number, episode_number = parsed
 
-    if not (1 <= season_number <= MAX_EPISODE_COORDINATE) or not (
+    # Season 0 is Stremio's specials bucket and is legitimate; episodes start at
+    # 1, so only the season bound is relaxed.
+    if not (0 <= season_number <= MAX_EPISODE_COORDINATE) or not (
         1 <= episode_number <= MAX_EPISODE_COORDINATE
     ):
         logger.info(
