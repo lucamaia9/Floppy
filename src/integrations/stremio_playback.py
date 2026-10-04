@@ -249,6 +249,68 @@ def normalize_state(entry, target_id, media_type):
     }
 
 
+def _milliseconds_to_seconds(value):
+    """Return a non-negative whole second count, or None when unusable."""
+    try:
+        return max(0, int(value) // 1000)
+    except (TypeError, ValueError):
+        return None
+
+def poll_observation_from_state(media_type, media_id, entry):
+    """Build one tracker Observation from a cloud-library entry, or None.
+
+    This is the poller's output to the tracker merge point.  It exists because
+    `normalize_state` drops Stremio's `timeOffset`: without it a client that
+    cannot emit player events leaves no resume position behind.
+
+    `observed_at` is stamped with OUR clock, not Stremio's `lastWatched`.
+    Ordering compares observations across sources, and player events are
+    stamped with server receive time, so a Stremio-domain timestamp is not
+    comparable.  `lastWatched` stays data — the library event path uses it for
+    the session-boundary grace check — but it is never the ordering stamp.
+
+    `watched` is three-state, read from Stremio's own `flaggedWatched` rather
+    than re-derived from `time_watched > duration * 0.7`: an explicit zero is a
+    real assertion that clears a completed session, and a missing key asserts
+    nothing and stays None.
+
+    DO NOT wire this into the merge point while
+    `integrations.tasks._webhook.verify_stremio_playback` still calls
+    `_process_webhook` for a completed session.  That path appends the play
+    itself, so folding this observation in as well would append every completed
+    play twice.  The wiring ships with that path's removal.
+    """
+    state = entry.get("state") if isinstance(entry, dict) else None
+    if not isinstance(state, dict):
+        logger.info(
+            "stremio_poll status=unusable media_type=%s media_id=%s reason=missing_state",
+            media_type,
+            media_id,
+        )
+        return None
+
+    duration_seconds = _milliseconds_to_seconds(state.get("duration"))
+    if not duration_seconds:
+        logger.info(
+            "stremio_poll status=unusable media_type=%s media_id=%s reason=missing_duration",
+            media_type,
+            media_id,
+        )
+        return None
+
+    from integrations import stremio_tracker
+
+    flagged = state.get("flaggedWatched")
+    return stremio_tracker.Observation(
+        source="poll",
+        action="observed",
+        position_seconds=_milliseconds_to_seconds(state.get("timeOffset")),
+        duration_seconds=duration_seconds,
+        watched=None if flagged is None else bool(_float(flagged)),
+        observed_at=timezone.now(),
+        video_id=(state.get("video_id") or None) if media_type == "series" else None,
+    )
+
 def deadline_for_runtime(started, duration_ms):
     """Return the absolute bounded deadline for one known media runtime."""
     runtime = max(1.0, duration_ms / 1000.0)
