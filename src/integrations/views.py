@@ -5370,10 +5370,26 @@ def stremio_addon_library(
     extra=None,
     config=None,
 ):
-    """Accept a Stremio library event. Implemented in Task 7."""
-    user, _grant = stremio_catalog.resolve_addon_credential(token)
+    """Record one Stremio library event (watched/unwatched/add/remove)."""
+    user, grant = stremio_catalog.resolve_addon_credential(token)
     if user is None:
+        logger.warning("Invalid token on Stremio addon library request")
         return _stremio_addon_response({"error": "Invalid token"}, status=401)
+    if grant is not None and not grant.allow_playback_start:
+        # This route writes watch state, which needs the playback permission.
+        logger.info("stremio_library rejected reason=grant_excludes_playback_start")
+        return _stremio_addon_response({"success": True})
+
+    if media_type not in {"movie", "series"}:
+        return _stremio_addon_response({"success": True})
+
+    try:
+        stremio_tracker.record_library_event(user, media_type, media_id, extra)
+    except Exception:
+        # Stremio ignores the body; a 500 only makes the client retry and
+        # achieves nothing. Log and accept.
+        logger.exception("stremio_library status=handler_failed user_id=%s", user.id)
+
     return _stremio_addon_response({"success": True})
 
 

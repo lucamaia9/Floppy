@@ -18,7 +18,7 @@ from django.utils import timezone
 from app.models import Episode, Item, Movie, PlaybackProgress
 from app.models.choices import MediaTypes, Sources
 
-from .stremio_events import parse_player_extra
+from .stremio_events import parse_library_extra, parse_player_extra
 from .stremio_playback import _parse_episode
 
 logger = logging.getLogger(__name__)
@@ -529,3 +529,98 @@ def record_player_event(user, media_type, media_id, extra, *, now=None):
     )
     cache.set(key, session, timeout=_SESSION_TTL_SECONDS)
     return "recorded"
+
+
+_WATCHED_ACTIONS = frozenset({"watched"})
+_UNWATCHED_ACTIONS = frozenset({"unwatched"})
+
+
+def record_library_event(user, media_type, media_id, extra, *, now=None):
+    """Handle one `library` event: parse, resolve each target, merge, persist.
+
+    A library event names a library *item* in the path (the series for a
+    series) and carries the episode(s) in `videoId` — the opposite of the
+    `player` path, whose id is the video id itself. With no video id the event
+    is item-level, which for a series means the series itself.
+
+    Returns a status string for logging and tests.
+    """
+    event = parse_library_extra(extra)
+    if event is None:
+        logger.info("stremio_tracker status=invalid_extra source=library")
+        return "invalid_extra"
+
+    media_id = unquote(media_id)
+    now = now or timezone.now()
+
+    targets = list(event.video_ids) or [None]
+    if len(targets) > VIDEO_ID_BATCH_LIMIT:
+        logger.info(
+            "stremio_tracker status=batch_truncated count=%s",
+            len(targets),
+        )
+        targets = targets[:VIDEO_ID_BATCH_LIMIT]
+
+    recorded = 0
+    for video_id in targets:
+        if _record_one_library_target(
+            user,
+            media_type,
+            media_id,
+            video_id,
+            event.action,
+            now,
+        ):
+            recorded += 1
+
+    if recorded == 0:
+        return "unresolved_media"
+    return "recorded"
+
+
+def _record_one_library_target(user, media_type, media_id, video_id, action, now):
+    """Apply one library action to one media identity. Returns whether it landed."""
+    from django.core.cache import cache
+
+    item = resolve_media_identity(user, media_type, media_id, video_id)
+    if item is None:
+        return False
+
+    # `watched` is three-state, and this resource is where `False` is
+    # legitimate: an explicit un-watch asserts the item is not watched and
+    # clears a completed session. `libraryAdd`/`libraryRemove` assert nothing,
+    # so they pass `None` — a `False` would wrongly clear completed state.
+    watched = None
+    if action in _WATCHED_ACTIONS:
+        watched = True
+    elif action in _UNWATCHED_ACTIONS:
+        watched = False
+
+    observation = Observation(
+        source="library",
+        action=action,
+        position_seconds=None,
+        duration_seconds=None,
+        watched=watched,
+        observed_at=now,
+        video_id=video_id,
+    )
+
+    key, session = _load_session(user.id, media_type, media_id, video_id, now)
+    # The cached session is not necessarily the one this observation belongs
+    # to; the returned session carries any boundary (and the right start time
+    # for the play's dedup id).
+    session = session_for_observation(session, observation, now=now)
+    result = apply_observation(session, observation)
+
+    persist_merge_result(
+        user,
+        item,
+        result,
+        media_id=media_id,
+        video_id=video_id,
+        session_started_at=session.get("started_at"),
+        ended_at=now,
+    )
+    cache.set(key, session, timeout=_SESSION_TTL_SECONDS)
+    return True
