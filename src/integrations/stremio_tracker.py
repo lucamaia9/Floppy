@@ -15,8 +15,15 @@ from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
 
+# The shared durable-progress sink. Imported at module scope: `api.urls` is
+# included ahead of `integrations.urls` in the root URLconf, and neither
+# `fork_views_playback` nor its `integrations.delivery` dependency imports this
+# module, so there is no cycle.
+from api.fork_views_playback import upsert_playback_progress
+from app import fork_services_play_dedupe as play_dedupe
 from app.models import Episode, Item, Movie, PlaybackProgress
 from app.models.choices import MediaTypes, Sources
+from app.services.progress_changes import record_progress_deletion
 
 from .stremio_events import parse_library_extra, parse_player_extra
 from .stremio_playback import _parse_episode
@@ -375,9 +382,24 @@ def _append_play(user, item, external_id, ended_at):
 
     Returns whether a play was created. `Movie.watch` returns `(play, created)`;
     `Season.watch` returns an `EpisodeWatchResult(episode, created)`.
+
+    The legacy verifier appends the same viewing when it completes a title at
+    90%, and it dedups on a time window rather than on the session id this
+    function passes. That check has to run here too, or one finished title
+    lands as two history rows.
     """
     movie = Movie.objects.filter(item=item, user=user).first()
     if movie is not None:
+        if play_dedupe.existing_movie_play_times(
+            user,
+            media_ids=[item.media_id],
+            source=item.source,
+        ).is_duplicate(item.media_id, ended_at):
+            logger.debug(
+                "stremio_tracker status=duplicate_play source=movie near=%s",
+                ended_at,
+            )
+            return False
         _play, created = movie.watch(ended_at, external_id=external_id)
         return bool(created)
 
@@ -387,6 +409,17 @@ def _append_play(user, item, external_id, ended_at):
         .first()
     )
     if episode is not None:
+        play_key = (item.media_id, item.season_number, item.episode_number)
+        if play_dedupe.existing_episode_play_times(
+            user,
+            media_ids=[item.media_id],
+            source=item.source,
+        ).is_duplicate(play_key, ended_at):
+            logger.debug(
+                "stremio_tracker status=duplicate_play source=episode near=%s",
+                ended_at,
+            )
+            return False
         result = episode.related_season.watch(
             item.episode_number,
             ended_at,
@@ -413,18 +446,29 @@ def persist_merge_result(
 
     ended_at = ended_at or timezone.now()
 
+    # `upsert_playback_progress` is the one durable-progress sink: it takes the
+    # row lock and records the ordered change a delta-sync client reads. The
+    # position write must go through it rather than through the row directly,
+    # and a duration-less observation must preserve the stored duration instead
+    # of clearing it.
     with transaction.atomic():
         if result.clear_progress:
-            PlaybackProgress.objects.filter(user=user, item=item).delete()
-        elif result.position_seconds is not None:
-            PlaybackProgress.objects.update_or_create(
+            removed, _detail = PlaybackProgress.objects.filter(
                 user=user,
                 item=item,
-                defaults={
-                    "position_seconds": result.position_seconds,
-                    "duration_seconds": result.duration_seconds,
-                    "completed": result.completed,
-                },
+            ).delete()
+            if removed:
+                # Explicit tombstone: a cleared row is simply absent from a
+                # timestamp query, and absence is never a delete.
+                record_progress_deletion(user, item)
+        elif result.position_seconds is not None:
+            upsert_playback_progress(
+                user,
+                item,
+                result.position_seconds,
+                result.duration_seconds,
+                completed=result.completed,
+                preserve_duration=result.duration_seconds is None,
             )
 
         if not result.record_play:
@@ -584,6 +628,11 @@ def _record_one_library_target(user, media_type, media_id, video_id, action, now
 
     item = resolve_media_identity(user, media_type, media_id, video_id)
     if item is None:
+        # Never log the id itself: it is client-supplied and unbounded.
+        logger.info(
+            "stremio_tracker status=unresolved_media source=library media_type=%s",
+            media_type,
+        )
         return False
 
     # `watched` is three-state, and this resource is where `False` is

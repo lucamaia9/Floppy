@@ -71,6 +71,51 @@ class PlayerRouteTests(TestCase):
         self.assertNotEqual(self.client.get(url).status_code, 404)
 
 
+class InvalidMediaIdTests(TestCase):
+    """A media id that fails the addon pattern never reaches the tracker.
+
+    The id is client-supplied and is bound into queries downstream, so the
+    route rejects it up front rather than letting the handler resolve it.
+    """
+
+    def setUp(self):
+        self.user = User.objects.create_user(username="routes-invalid", password="x")
+
+    def test_player_route_rejects_an_invalid_media_id(self):
+        url = reverse(
+            "stremio_addon_player",
+            kwargs={
+                "token": self.user.token,
+                "media_type": "movie",
+                "media_id": "not-an-id",
+                "extra": "action=start&currentTime=1000",
+            },
+        )
+
+        with patch.object(views.stremio_tracker, "record_player_event") as handler:
+            response = self.client.get(url)
+
+        self.assertEqual(response.status_code, 400)
+        handler.assert_not_called()
+
+    def test_library_route_rejects_an_invalid_media_id(self):
+        url = reverse(
+            "stremio_addon_library",
+            kwargs={
+                "token": self.user.token,
+                "media_type": "series",
+                "media_id": "tt1%3A0%3A2",
+                "extra": "action=watched",
+            },
+        )
+
+        with patch.object(views.stremio_tracker, "record_library_event") as handler:
+            response = self.client.get(url)
+
+        self.assertEqual(response.status_code, 400)
+        handler.assert_not_called()
+
+
 class PlayerResourceGateTests(TestCase):
     """The player/library resources must be withdrawable without a code change."""
 

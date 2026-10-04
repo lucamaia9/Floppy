@@ -5346,8 +5346,21 @@ def stremio_addon_player(
         logger.info("stremio_player rejected reason=grant_excludes_playback_start")
         return _stremio_addon_response({"success": True})
 
-    if media_type not in {"movie", "series"}:
-        return _stremio_addon_response({"success": True})
+    media_id = unquote(media_id)
+    if (
+        media_type not in {"movie", "series"}
+        or len(media_id) > STREMIO_MAX_MEDIA_ID_LENGTH
+        or not STREMIO_MEDIA_ID_PATTERN.fullmatch(media_id)
+        or (media_type == "movie" and ":" in media_id)
+    ):
+        # The id is client-supplied and is bound into the tracker's queries, so
+        # it is rejected here rather than handed to the handler.
+        logger.info(
+            "stremio_player rejected reason=invalid_media_id user_id=%s media_type=%s",
+            user.id,
+            media_type,
+        )
+        return _stremio_addon_response({"success": False}, status=400)
 
     try:
         stremio_tracker.record_player_event(user, media_type, media_id, extra)
@@ -5380,8 +5393,21 @@ def stremio_addon_library(
         logger.info("stremio_library rejected reason=grant_excludes_playback_start")
         return _stremio_addon_response({"success": True})
 
-    if media_type not in {"movie", "series"}:
-        return _stremio_addon_response({"success": True})
+    media_id = unquote(media_id)
+    if (
+        media_type not in {"movie", "series"}
+        or len(media_id) > STREMIO_MAX_MEDIA_ID_LENGTH
+        or not STREMIO_MEDIA_ID_PATTERN.fullmatch(media_id)
+        or (media_type == "movie" and ":" in media_id)
+    ):
+        # The id is client-supplied and is bound into the tracker's queries, so
+        # it is rejected here rather than handed to the handler.
+        logger.info(
+            "stremio_library rejected reason=invalid_media_id user_id=%s media_type=%s",
+            user.id,
+            media_type,
+        )
+        return _stremio_addon_response({"success": False}, status=400)
 
     try:
         stremio_tracker.record_library_event(user, media_type, media_id, extra)

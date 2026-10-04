@@ -6,7 +6,7 @@ from django.test import TestCase
 from django.utils import timezone
 
 from app.mixins import disable_fetch_releases
-from app.models import Item, Movie, PlaybackProgress
+from app.models import Item, Movie, MoviePlay, PlaybackProgress
 from app.models.choices import MediaTypes, Sources
 from integrations import stremio_tracker as tracker
 
@@ -162,7 +162,10 @@ class RecordPlayerEventTests(TestCase):
         )
         self.assertEqual(self._plays(), 1)
 
-        later = first + timedelta(hours=2)
+        # Beyond the shared dedupe window (3h when the item's runtime is
+        # unknown), so this is genuinely a second viewing rather than the same
+        # one re-reported.
+        later = first + timedelta(hours=4)
         tracker.record_player_event(
             self.user,
             "movie",
@@ -179,3 +182,51 @@ class RecordPlayerEventTests(TestCase):
         )
 
         self.assertEqual(self._plays(), 2)
+
+    def test_a_legacy_movie_play_suppresses_the_tracker_append(self):
+        """The 90%-completion verifier and the client's `stop` are one play.
+
+        The legacy path stores its play as a `MoviePlay` row (what `Movie.watch`
+        creates); the tracker must measure its own append against it, or one
+        finished movie lands as two history rows.
+        """
+        ended = timezone.now()
+        movie = Movie.objects.get(item=self.item, user=self.user)
+        MoviePlay.objects.create(movie=movie, end_date=ended)
+
+        tracker.record_player_event(
+            self.user,
+            "movie",
+            "tt700",
+            "action=stop&currentTime=450000&duration=600000",
+            now=ended + timedelta(minutes=1),
+        )
+
+        self.assertEqual(self._plays(), 1)
+
+    def test_a_legacy_importer_movie_row_suppresses_the_tracker_append(self):
+        """The importer shape: an extra completed `Movie` row is one play.
+
+        `existing_movie_play_times` reads both storage shapes, so a completed
+        `Movie` row with an `end_date` must suppress the tracker's append just
+        as a `MoviePlay` does.
+        """
+        ended = timezone.now()
+        Movie.objects.create(item=self.item, user=self.user, end_date=ended)
+
+        tracker.record_player_event(
+            self.user,
+            "movie",
+            "tt700",
+            "action=stop&currentTime=450000&duration=600000",
+            now=ended + timedelta(minutes=1),
+        )
+
+        # A second Movie row means `Movie.objects.get` is ambiguous, so count
+        # the plays directly: the tracker appended none.
+        self.assertEqual(
+            MoviePlay.objects.filter(
+                movie__item=self.item, movie__user=self.user
+            ).count(),
+            0,
+        )

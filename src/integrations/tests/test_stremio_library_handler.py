@@ -201,7 +201,7 @@ class RecordLibraryEventTests(TestCase):
             "movie",
             "tt800",
             "action=watched",
-            now=first + timedelta(hours=2),
+            now=first + timedelta(hours=4),
         )
 
         self.assertEqual(self._plays(), 2)
@@ -295,3 +295,137 @@ class LibraryVideoIdBatchTests(TestCase):
         self.assertEqual(status, "recorded")
         self.assertEqual(self._plays(1), 1)
         self.assertEqual(self._plays(2), 1)
+
+
+class LegacyVerifierOverlapTests(TestCase):
+    """The tracker must consult the shared play dedupe before appending.
+
+    The legacy verifier completes a title at 90% while playback continues, and
+    the tracker sees the client's own `stop` minutes later. Both describe one
+    viewing, so the second append has to be suppressed by the same window check
+    the legacy webhook path uses.
+    """
+
+    def setUp(self):
+        cache.clear()
+        self.addCleanup(cache.clear)
+        self.user = User.objects.create_user(username="legacy-overlap", password="x")
+        metadata = patch(
+            "app.models.providers.services.get_media_metadata",
+            return_value={
+                "season/1": {
+                    "episodes": [{"episode_number": number} for number in (1, 2, 3)],
+                },
+                "related": {"seasons": [{"season_number": 1}]},
+                "cast": [],
+                "crew": [],
+            },
+        )
+        metadata.start()
+        self.addCleanup(metadata.stop)
+        with disable_fetch_releases():
+            series_item = Item.objects.create(
+                media_id="1399",
+                source=Sources.TMDB.value,
+                media_type=MediaTypes.TV.value,
+                provider_external_ids={"imdb_id": "tt900"},
+                title="Overlap Series",
+                image="",
+            )
+            tv = TV.objects.create(
+                item=series_item,
+                user=self.user,
+                status=Status.PLANNING.value,
+            )
+            season_item = Item.objects.create(
+                media_id="1399",
+                source=Sources.TMDB.value,
+                media_type=MediaTypes.SEASON.value,
+                season_number=1,
+                title="Overlap Series",
+                image="",
+            )
+            self.season = Season.objects.create(
+                item=season_item,
+                related_tv=tv,
+                user=self.user,
+                status=Status.PLANNING.value,
+            )
+            self.episode_item = Item.objects.create(
+                media_id="1399",
+                source=Sources.TMDB.value,
+                media_type=MediaTypes.EPISODE.value,
+                season_number=1,
+                episode_number=2,
+                title="An Episode",
+                image="",
+            )
+            # Seed the row the tracker reaches the season through; it is
+            # fixture plumbing, so `_plays` counts it out.
+            Episode.objects.bulk_create(
+                [
+                    Episode(
+                        item=self.episode_item,
+                        related_season=self.season,
+                        end_date=None,
+                    ),
+                ],
+            )
+            self.seeded_plays = Episode.objects.filter(
+                item=self.episode_item,
+            ).count()
+
+    def _plays(self):
+        return (
+            Episode.objects.filter(item=self.episode_item).count() - self.seeded_plays
+        )
+
+    def test_a_legacy_episode_play_suppresses_the_tracker_append(self):
+        """The 90%-completion verifier and the client's `stop` are one play."""
+        ended = timezone.now()
+        # What the legacy path leaves behind: the verifier completed the
+        # episode at 90%, so the play row is already there when the client's
+        # own `stop` arrives a minute later.
+        Episode.objects.create(
+            item=self.episode_item,
+            related_season=self.season,
+            end_date=ended,
+        )
+
+        tracker.record_player_event(
+            self.user,
+            "series",
+            "tt900%3A1%3A2",
+            "action=stop&currentTime=1410000&duration=1500000",
+            now=ended + timedelta(minutes=1),
+        )
+
+        self.assertEqual(self._plays(), 1)
+
+    def test_a_player_stop_then_a_library_watched_appends_one_play(self):
+        """The two producers share one session, so they append one play.
+
+        A client that emits events sends both a `player` stop and a `library`
+        watched flag for the same viewing. They are the same session (the
+        library event names the same video id), so the flag must not append a
+        second history row.
+        """
+        ended = timezone.now()
+        tracker.record_player_event(
+            self.user,
+            "series",
+            "tt900%3A1%3A2",
+            "action=stop&currentTime=1410000&duration=1500000",
+            now=ended,
+        )
+        self.assertEqual(self._plays(), 1)
+
+        tracker.record_library_event(
+            self.user,
+            "series",
+            "tt900",
+            "action=watched&videoId=tt900%3A1%3A2",
+            now=ended + timedelta(minutes=1),
+        )
+
+        self.assertEqual(self._plays(), 1)

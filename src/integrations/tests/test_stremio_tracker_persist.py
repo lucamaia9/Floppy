@@ -6,7 +6,16 @@ from django.test import TestCase
 from django.utils import timezone
 
 from app.mixins import disable_fetch_releases
-from app.models import TV, Episode, Item, Movie, PlaybackProgress, Season
+from app.models import (
+    TV,
+    Episode,
+    Item,
+    Movie,
+    PlaybackProgress,
+    ProgressChange,
+    Season,
+    WatchStateSequence,
+)
 from app.models.choices import MediaTypes, Sources, Status
 from integrations import stremio_tracker as tracker
 
@@ -53,6 +62,38 @@ class PersistMergeResultTests(TestCase):
         self.assertEqual(progress.position_seconds, 120)
         self.assertEqual(progress.duration_seconds, 600)
         self.assertFalse(progress.completed)
+
+    def test_position_without_duration_preserves_the_stored_duration(self):
+        """A position-only observation must not wipe a known duration.
+
+        Stremio's player events carry a duration, but a library or poll
+        observation carries only a position. Writing ``None`` over the stored
+        duration loses the runtime the resume bar is drawn from, so the shared
+        sink's preserve flag has to be honoured here too.
+        """
+        tracker.persist_merge_result(
+            self.user,
+            self.item,
+            self._result(position_seconds=120, duration_seconds=600),
+            media_id="tt500",
+            video_id=None,
+            session_started_at=None,
+            ended_at=None,
+        )
+
+        tracker.persist_merge_result(
+            self.user,
+            self.item,
+            self._result(position_seconds=180, duration_seconds=None),
+            media_id="tt500",
+            video_id=None,
+            session_started_at=None,
+            ended_at=None,
+        )
+
+        progress = PlaybackProgress.objects.get(user=self.user, item=self.item)
+        self.assertEqual(progress.position_seconds, 180)
+        self.assertEqual(progress.duration_seconds, 600)
 
     def test_clear_progress_removes_the_row(self):
         PlaybackProgress.objects.create(
@@ -144,7 +185,9 @@ class PersistMergeResultTests(TestCase):
 
     def test_a_second_session_appends_a_second_play(self):
         first = timezone.now()
-        second = first + timedelta(hours=3)
+        # Beyond the shared dedupe window, so this is genuinely a second
+        # viewing rather than the same one re-reported.
+        second = first + timedelta(hours=4)
         for started in (first, second):
             tracker.persist_merge_result(
                 self.user,
@@ -157,6 +200,78 @@ class PersistMergeResultTests(TestCase):
             )
 
         self.assertEqual(self.movie.plays.count(), 2)
+
+
+class ProgressChangeEmissionTests(TestCase):
+    """A tracker-driven write must feed the same change log as the API.
+
+    Delta-sync clients learn about resume-position movement from
+    ``ProgressChange`` rows, so a Stremio event that moves or clears a position
+    without recording one is invisible to them.
+    """
+
+    def setUp(self):
+        self.user = User.objects.create_user(username="persist-changes", password="x")
+        self.item = Item.objects.create(
+            media_id="tt600",
+            source=Sources.TMDB.value,
+            media_type=MediaTypes.MOVIE.value,
+            title="Change Logged",
+            image="",
+        )
+        Movie.objects.create(item=self.item, user=self.user)
+        WatchStateSequence.objects.update_or_create(
+            user=self.user,
+            defaults={"emit_changes": True},
+        )
+
+    def _result(self, **overrides):
+        defaults = {
+            "completed": False,
+            "position_seconds": 120,
+            "duration_seconds": 600,
+            "record_play": False,
+            "clear_progress": False,
+            "settled": False,
+            "last_event_at": None,
+        }
+        defaults.update(overrides)
+        return tracker.MergeResult(**defaults)
+
+    def test_a_position_update_records_a_progress_change(self):
+        tracker.persist_merge_result(
+            self.user,
+            self.item,
+            self._result(position_seconds=240),
+            media_id="tt600",
+            video_id=None,
+            session_started_at=None,
+            ended_at=None,
+        )
+
+        change = ProgressChange.objects.get(user=self.user, item=self.item)
+        self.assertEqual(change.kind, "upsert")
+        self.assertEqual(change.position_seconds, 240)
+
+    def test_a_clear_records_a_delete_tombstone(self):
+        PlaybackProgress.objects.create(
+            user=self.user,
+            item=self.item,
+            position_seconds=300,
+        )
+
+        tracker.persist_merge_result(
+            self.user,
+            self.item,
+            self._result(clear_progress=True, position_seconds=None),
+            media_id="tt600",
+            video_id=None,
+            session_started_at=None,
+            ended_at=None,
+        )
+
+        change = ProgressChange.objects.get(user=self.user, item=self.item)
+        self.assertEqual(change.kind, "delete")
 
 
 class PersistMergeResultEpisodeTests(TestCase):
@@ -290,7 +405,9 @@ class PersistMergeResultEpisodeTests(TestCase):
 
     def test_a_second_episode_session_appends_a_second_play(self):
         first = timezone.now()
-        second = first + timedelta(hours=3)
+        # Beyond the shared dedupe window, so this is genuinely a second
+        # viewing rather than the same one re-reported.
+        second = first + timedelta(hours=4)
         for started in (first, second):
             self._persist(started)
 
