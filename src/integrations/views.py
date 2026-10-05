@@ -61,6 +61,7 @@ from integrations import (
     psn_api,
     seerr_api,
     stremio_catalog,
+    stremio_events,
     stremio_queue,
     stremio_tracker,
     tasks,
@@ -5247,7 +5248,7 @@ def stremio_addon_meta(request, token, media_type, media_id):
 @login_not_required
 @csrf_exempt
 @require_GET
-def stremio_addon_subtitles(request, token, media_type, media_id, config=None):
+def stremio_addon_subtitles(request, token, media_type, media_id, extra=None, config=None):
     """Record a playback-start scrobble from a Stremio subtitles request."""
     from django.core.cache import cache
 
@@ -5291,6 +5292,20 @@ def stremio_addon_subtitles(request, token, media_type, media_id, config=None):
             user.id,
         )
     elif throttle_added:
+        # Reported, not used: Stremio appends the selected release's
+        # `videoHash`/`videoSize`/`filename` here, and Floppy has always
+        # discarded them. One line per item per throttle window is enough to
+        # decide whether they are worth reading.
+        extras = stremio_events.parse_subtitles_video_extras(extra)
+        logger.info(
+            "stremio_subtitles_extras user_id=%s media_type=%s videoHash=%s "
+            "videoSize=%s filename=%s",
+            user.id,
+            media_type,
+            extras["videoHash"],
+            extras["videoSize"],
+            extras["filename"],
+        )
         queue_member = stremio_queue.member(media_type, media_id)
         queue_status = stremio_queue.reserve_pending(user.id, queue_member)
         if queue_status == "accepted":

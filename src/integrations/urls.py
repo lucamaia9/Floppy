@@ -334,7 +334,8 @@ urlpatterns = [
     ),
     re_path(
         r"^stremio-addon/(?P<token>[^/]+)/c/(?P<config>[^/]+)/subtitles/"
-        r"(?P<media_type>movie|series)/(?P<media_id>[^/]+?)(?:/[^/]*)?\.json$",
+        r"(?P<media_type>movie|series)/(?P<media_id>[^/]+?)"
+        r"(?:/(?P<extra>[^/]*))?\.json$",
         views.stremio_addon_subtitles,
         name="stremio_addon_subtitles_configured",
     ),
@@ -354,12 +355,14 @@ urlpatterns = [
     ),
     re_path(
         r"^stremio-addon/(?P<token>[^/]+)/subtitles/"
-        r"(?P<media_type>movie|series)/(?P<media_id>[^/]+?)(?:/.*)?\.json$",
+        r"(?P<media_type>movie|series)/(?P<media_id>[^/]+?)"
+        r"(?:/(?P<extra>[^/]*))?\.json$",
         views.stremio_addon_subtitles,
         name="stremio_addon_subtitles",
     ),
     # `player` and `library` capture the extra: position and duration travel in
-    # it, unlike the subtitles route where it is discarded.
+    # it. So does `subtitles`, whose extra carries the selected release's
+    # `videoHash`/`videoSize`/`filename`; it is reported, not yet used.
     re_path(
         r"^stremio-addon/(?P<token>[^/]+)/c/(?P<config>[^/]+)/player/"
         r"(?P<media_type>movie|series)/(?P<media_id>[^/]+?)/"

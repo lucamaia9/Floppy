@@ -9,7 +9,6 @@ key yields None rather than a wrong number.
 from dataclasses import dataclass
 from urllib.parse import unquote
 
-
 PLAYER_ACTIONS = frozenset({"start", "pause", "stop"})
 LIBRARY_ACTIONS = frozenset({"libraryAdd", "libraryRemove", "watched", "unwatched"})
 
@@ -95,3 +94,19 @@ def parse_library_extra(extra):
         part for part in (chunk.strip() for chunk in raw_video_id.split(",")) if part
     )
     return LibraryEvent(action=action, video_ids=video_ids)
+
+# Stremio appends these to the `subtitles` path when the selected stream
+# carries them — from the player's `VideoParams` or the stream's
+# `behavior_hints`. See `subtitles_update` in stremio-core's `models/player.rs`.
+SUBTITLES_VIDEO_EXTRAS = ("videoHash", "videoSize", "filename")
+
+def parse_subtitles_video_extras(extra):
+    """Return which video extras arrived on a `subtitles` request.
+
+    Floppy serves subtitles itself, so this extra has always been discarded by
+    the route. It is the only release-level attribution Stremio offers, so
+    presence is reported before anything is built on it — a client that omits
+    all three sends the route no extra at all, which is itself the answer.
+    """
+    pairs = _parse_pairs(extra)
+    return {name: bool(pairs.get(name)) for name in SUBTITLES_VIDEO_EXTRAS}

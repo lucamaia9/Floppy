@@ -2,10 +2,11 @@ import os
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
+from django.core.cache import cache
 from django.test import TestCase
 from django.urls import reverse
 
-from integrations import views
+from integrations import stremio_events, views
 
 User = get_user_model()
 
@@ -147,6 +148,95 @@ class InvalidMediaIdTests(TestCase):
 
                 self.assertEqual(response.status_code, 200)
                 handler.assert_called_once()
+
+
+class SubtitlesVideoExtrasTests(TestCase):
+    """The `subtitles` extra carries the selected release's identity.
+
+    Stremio appends `videoHash`/`videoSize`/`filename` when the chosen stream
+    has them. Floppy serves subtitles itself and never read the extra, so the
+    route captures it and reports presence — nothing is stored yet.
+    """
+
+    def setUp(self):
+        self.user = User.objects.create_user(username="subtitles-extras", password="x")
+        # The handler logs only on the first request per item per window, so a
+        # leftover throttle key would silence the line under test.
+        cache.clear()
+
+    def _get(self, extra=None, media_id="tt1"):
+        kwargs = {
+            "token": self.user.token,
+            "media_type": "movie",
+            "media_id": media_id,
+        }
+        if extra is not None:
+            kwargs["extra"] = extra
+        url = reverse("stremio_addon_subtitles", kwargs=kwargs)
+        with patch.object(views.stremio_queue, "reserve_pending", return_value="throttled"):
+            return self.client.get(url)
+
+    def test_the_route_still_resolves_without_an_extra(self):
+        """A client that sends no extra must keep working.
+
+        The segment is optional. Requiring it would 404 every such request and
+        stop playback tracking for that client with no error anywhere.
+        """
+        response = self._get()
+
+        self.assertEqual(response.status_code, 200)
+
+    def test_the_log_reports_which_release_extras_arrived(self):
+        with self.assertLogs("integrations.views", level="INFO") as captured:
+            self._get(extra="videoHash=abc123&videoSize=12345&filename=Show.S01E01.mkv")
+
+        line = next(
+            entry for entry in captured.output if "stremio_subtitles_extras" in entry
+        )
+        self.assertIn("videoHash=True", line)
+        self.assertIn("videoSize=True", line)
+        self.assertIn("filename=True", line)
+
+    def test_a_client_that_sends_nothing_is_reported_as_sending_nothing(self):
+        """Absence is the answer too, so it must be visible rather than silent."""
+        with self.assertLogs("integrations.views", level="INFO") as captured:
+            self._get()
+
+        line = next(
+            entry for entry in captured.output if "stremio_subtitles_extras" in entry
+        )
+        self.assertIn("videoHash=False", line)
+        self.assertIn("videoSize=False", line)
+        self.assertIn("filename=False", line)
+
+
+class ParseSubtitlesVideoExtrasTests(TestCase):
+    def test_it_reports_present_and_absent_extras(self):
+        parsed = stremio_events.parse_subtitles_video_extras(
+            "videoHash=abc&filename=Show.S01E01.mkv",
+        )
+
+        self.assertEqual(
+            parsed,
+            {"videoHash": True, "videoSize": False, "filename": True},
+        )
+
+    def test_an_empty_value_counts_as_absent(self):
+        """Stremio omits the key rather than sending an empty one, but a blank
+        value must not be read as a usable hash or filename.
+        """
+        parsed = stremio_events.parse_subtitles_video_extras("videoHash=&filename=")
+
+        self.assertEqual(
+            parsed,
+            {"videoHash": False, "videoSize": False, "filename": False},
+        )
+
+    def test_no_extra_reports_nothing_present(self):
+        self.assertEqual(
+            stremio_events.parse_subtitles_video_extras(None),
+            {"videoHash": False, "videoSize": False, "filename": False},
+        )
 
 
 class PlayerResourceGateTests(TestCase):
