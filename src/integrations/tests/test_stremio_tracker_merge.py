@@ -24,6 +24,41 @@ class MergePolicyTests(SimpleTestCase):
         defaults.update(overrides)
         return tracker.Observation(**defaults)
 
+    def test_a_poll_completion_does_not_record_a_play(self):
+        """A poll reports the item's state, not evidence of a viewing.
+
+        A replay of an already-watched title still reads `timesWatched=1`, so
+        recording a play here would complete the replay the moment it started —
+        the stale-snapshot case the verifier's baseline evidence rejects. The
+        progress row still reflects the library's flag.
+        """
+        result = tracker.apply_observation(
+            self.session,
+            self._obs(source="poll", watched=True, records_play=False),
+        )
+
+        self.assertTrue(result.completed)
+        self.assertFalse(result.record_play)
+
+    def test_a_poll_leaves_the_play_for_a_source_that_can_prove_one(self):
+        """A poll must not consume the session's one play.
+
+        `records_play=False` has to skip `play_recorded` as well as the append,
+        or the player stop that follows a poll would find the play already spent
+        and append nothing.
+        """
+        tracker.apply_observation(
+            self.session,
+            self._obs(source="poll", watched=True, records_play=False),
+        )
+
+        result = tracker.apply_observation(
+            self.session,
+            self._obs(source="player", action="stop", watched=True),
+        )
+
+        self.assertTrue(result.record_play)
+
     def test_playback_start_does_not_record_a_play(self):
         result = tracker.apply_observation(self.session, self._obs())
 

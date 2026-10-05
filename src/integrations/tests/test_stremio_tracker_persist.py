@@ -202,6 +202,79 @@ class PersistMergeResultTests(TestCase):
         self.assertEqual(self.movie.plays.count(), 2)
 
 
+class RecordPollObservationTests(TestCase):
+    """The poll wiring: a resume position reaches the durable store.
+
+    This is the only path that stores a position for a client that cannot emit
+    player events, so without it the row never appears.
+    """
+
+    def setUp(self):
+        self.user = User.objects.create_user(username="poll-wiring", password="x")
+        with disable_fetch_releases():
+            self.item = Item.objects.create(
+                media_id="603",
+                source=Sources.TMDB.value,
+                media_type=MediaTypes.MOVIE.value,
+                provider_external_ids={"imdb_id": "tt700"},
+                title="Polled",
+                image="",
+            )
+            self.movie = Movie.objects.create(
+                item=self.item,
+                user=self.user,
+                status=Status.IN_PROGRESS.value,
+            )
+
+    def _observation(self, **overrides):
+        defaults = {
+            "source": "poll",
+            "action": "observed",
+            "position_seconds": 300,
+            "duration_seconds": 600,
+            "watched": False,
+            "observed_at": timezone.now(),
+            "video_id": None,
+            "records_play": False,
+        }
+        defaults.update(overrides)
+        return tracker.Observation(**defaults)
+
+    def test_a_poll_stores_the_resume_position(self):
+        recorded = tracker.record_poll_observation(
+            self.user,
+            "movie",
+            "tt700",
+            self._observation(),
+        )
+
+        self.assertTrue(recorded)
+        progress = PlaybackProgress.objects.get(user=self.user, item=self.item)
+        self.assertEqual(progress.position_seconds, 300)
+        self.assertEqual(progress.duration_seconds, 600)
+
+    def test_a_watched_poll_appends_no_history_play(self):
+        """The library flag is item state; the verifier owns the history row."""
+        tracker.record_poll_observation(
+            self.user,
+            "movie",
+            "tt700",
+            self._observation(watched=True),
+        )
+
+        self.assertEqual(self.movie.plays.count(), 0)
+
+    def test_an_unresolved_identity_stores_nothing(self):
+        self.assertFalse(
+            tracker.record_poll_observation(
+                self.user,
+                "movie",
+                "tt999",
+                self._observation(),
+            ),
+        )
+        self.assertFalse(PlaybackProgress.objects.filter(user=self.user).exists())
+
 class ProgressChangeEmissionTests(TestCase):
     """A tracker-driven write must feed the same change log as the API.
 

@@ -162,7 +162,17 @@ _CLEAR_ACTIONS = frozenset({"unwatched", "libraryRemove"})
 
 @dataclass(frozen=True)
 class Observation:
-    """One fact about playback, from any source."""
+    """One fact about playback, from any source.
+
+    `records_play` says whether the fact is evidence of a *viewing*, which is
+    what earns a history row. The player and library sources report the session
+    in flight, so they are. A poll reports the item's state from the cloud
+    library, which can be stale relative to the session — a replay of an
+    already-watched title still reads `timesWatched=1` — so it is not, and the
+    history play stays the verifier's to append. A poll still carries `watched`,
+    because the library flag is authoritative for whether the item is watched,
+    and the progress row reflects that.
+    """
 
     source: str  # "player" | "library" | "poll" | "subtitles"
     action: str
@@ -171,6 +181,7 @@ class Observation:
     watched: bool | None
     observed_at: object
     video_id: str | None
+    records_play: bool = True
 
 
 @dataclass(frozen=True)
@@ -340,8 +351,15 @@ def apply_observation(session, observation):
     # raise OR clear it; no other rule may change it.
     completed = bool(session.get("completed"))
 
-    # Rule 5: a play is appended only on the false->true transition.
-    record_play = completed and not session.get("play_recorded")
+    # Rule 5: a play is appended only on the false->true transition, and only
+    # for an observation that is evidence of a viewing. A poll reports the
+    # item's state, which can be stale relative to the session in flight, so it
+    # never appends on its own.
+    record_play = (
+        observation.records_play
+        and completed
+        and not session.get("play_recorded")
+    )
     if record_play:
         session["play_recorded"] = True
 
@@ -502,6 +520,33 @@ def _load_session(user_id, media_type, media_id, video_id, now):
         session = new_session(video_id=video_id, started_at=now)
     return key, session
 
+def _fold_observation(user, item, media_type, media_id, video_id, observation, now):
+    """Merge one observation into its session and persist the result.
+
+    Returns whether a history play was appended. `media_id` is the identity the
+    session is keyed under — the series id for an episode — while `video_id` is
+    the episode coordinate.
+    """
+    from django.core.cache import cache
+
+    key, session = _load_session(user.id, media_type, media_id, video_id, now)
+    # The returned session is the one that carries the boundary: a rewatch
+    # starts a fresh session and must not reuse the settled one.
+    session = session_for_observation(session, observation, now=now)
+    result = apply_observation(session, observation)
+
+    appended = persist_merge_result(
+        user,
+        item,
+        result,
+        media_id=media_id,
+        video_id=video_id,
+        session_started_at=session.get("started_at"),
+        ended_at=now,
+    )
+    cache.set(key, session, timeout=_SESSION_TTL_SECONDS)
+    return appended
+
 
 def _looks_complete(event):
     """Return whether a `stop` position clears Stremio's watched threshold.
@@ -519,8 +564,6 @@ def record_player_event(user, media_type, media_id, extra, *, now=None):
 
     Returns a status string for logging and tests.
     """
-    from django.core.cache import cache
-
     event = parse_player_extra(extra)
     if event is None:
         logger.info("stremio_tracker status=invalid_extra source=player")
@@ -558,22 +601,7 @@ def record_player_event(user, media_type, media_id, extra, *, now=None):
         observed_at=now,
         video_id=video_id,
     )
-    key, session = _load_session(user.id, media_type, series_id, video_id, now)
-    # The returned session is the one that carries the boundary: a rewatch
-    # starts a fresh session and must not reuse the settled one.
-    session = session_for_observation(session, observation, now=now)
-    result = apply_observation(session, observation)
-
-    persist_merge_result(
-        user,
-        item,
-        result,
-        media_id=series_id,
-        video_id=video_id,
-        session_started_at=session.get("started_at"),
-        ended_at=now,
-    )
-    cache.set(key, session, timeout=_SESSION_TTL_SECONDS)
+    _fold_observation(user, item, media_type, series_id, video_id, observation, now)
     return "recorded"
 
 
@@ -626,8 +654,6 @@ def record_library_event(user, media_type, media_id, extra, *, now=None):
 
 def _record_one_library_target(user, media_type, media_id, video_id, action, now):
     """Apply one library action to one media identity. Returns whether it landed."""
-    from django.core.cache import cache
-
     item = resolve_media_identity(user, media_type, media_id, video_id)
     if item is None:
         # Never log the id itself: it is client-supplied and unbounded.
@@ -657,21 +683,38 @@ def _record_one_library_target(user, media_type, media_id, video_id, action, now
         video_id=video_id,
     )
 
-    key, session = _load_session(user.id, media_type, media_id, video_id, now)
-    # The cached session is not necessarily the one this observation belongs
-    # to; the returned session carries any boundary (and the right start time
-    # for the play's dedup id).
-    session = session_for_observation(session, observation, now=now)
-    result = apply_observation(session, observation)
+    _fold_observation(user, item, media_type, media_id, video_id, observation, now)
+    return True
 
-    persist_merge_result(
-        user,
-        item,
-        result,
-        media_id=media_id,
-        video_id=video_id,
-        session_started_at=session.get("started_at"),
-        ended_at=now,
-    )
-    cache.set(key, session, timeout=_SESSION_TTL_SECONDS)
+def record_poll_observation(user, media_type, media_id, observation, *, now=None):
+    """Fold one poll observation into the merge point for its media identity.
+
+    Returns whether the identity resolved. This is the wiring for
+    `stremio_playback.poll_observation_from_state`, and it is what stores a
+    resume position for a client that cannot emit player events.
+
+    The observation carries `records_play=False`: the poll reads the cloud
+    library, so it reports the item's state rather than evidence about the
+    session in flight. Completion and the history play stay the verifier's —
+    asserting the library's flag as a viewing would let a stale completed
+    snapshot complete a replay, which is the case the verifier's post-baseline
+    evidence exists to reject.
+    """
+    now = now or timezone.now()
+
+    # The poll's media id is already the video id for an episode (`tt123:1:2`),
+    # so the series id is its prefix; a movie id is the id. The same split the
+    # player path makes, so both address one session.
+    video_id = media_id if media_type == "series" and ":" in media_id else None
+    series_id = media_id.split(":")[0] if video_id else media_id
+
+    item = resolve_media_identity(user, media_type, series_id, video_id)
+    if item is None:
+        logger.info(
+            "stremio_tracker status=unresolved_media source=poll media_type=%s",
+            media_type,
+        )
+        return False
+
+    _fold_observation(user, item, media_type, series_id, video_id, observation, now)
     return True

@@ -301,11 +301,18 @@ def poll_observation_from_state(media_type, media_id, entry):
     explicitly asserting not-watched; when no field is usable nothing is
     asserted and the value stays None.
 
-    DO NOT wire this into the merge point while
-    `integrations.tasks._webhook.verify_stremio_playback` still calls
-    `_process_webhook` for a completed session.  That path appends the play
-    itself, so folding this observation in as well would append every completed
-    play twice.  The wiring ships with that path's removal.
+    `records_play` is False.  The library flag describes the ITEM, not the
+    session in flight: a replay of an already-watched title still reads
+    `timesWatched=1`, so treating it as evidence of a viewing would complete
+    the replay the moment it started — the stale-snapshot case the verifier's
+    post-baseline evidence exists to reject.  Position is what this observation
+    contributes, and the history play stays the verifier's to append.
+
+    Wiring this in does NOT double-append a completed play.  `records_play`
+    keeps the poll from appending at all, and the two paths that can append —
+    the tracker's `_append_play` and the webhook processor — both measure the
+    candidate against `play_dedupe` before writing, so one viewing lands as one
+    history row.
     """
     state = entry.get("state") if isinstance(entry, dict) else None
     if not isinstance(state, dict):
@@ -340,7 +347,37 @@ def poll_observation_from_state(media_type, media_id, entry):
         ),
         observed_at=timezone.now(),
         video_id=(state.get("video_id") or None) if media_type == "series" else None,
+        records_play=False,
     )
+
+def _record_poll_position(user, session, entry, now):
+    """Fold this poll's resume position into the tracker merge point.
+
+    Auxiliary to the session's purpose, so a failure is logged and swallowed:
+    the completion logic in `observe_session` is what the task exists for, and
+    it must not be abandoned because a position write failed.  This mirrors
+    `app.live_playback._store_playback_progress`, the other auxiliary progress
+    write.
+    """
+    from integrations import stremio_tracker
+
+    try:
+        observation = poll_observation_from_state(
+            session["media_type"],
+            session["media_id"],
+            entry,
+        )
+        if observation is None:
+            return
+        stremio_tracker.record_poll_observation(
+            user,
+            session["media_type"],
+            session["media_id"],
+            observation,
+            now=now,
+        )
+    except Exception:
+        logger.warning("Stremio poll position update failed", exc_info=True)
 
 def deadline_for_runtime(started, duration_ms):
     """Return the absolute bounded deadline for one known media runtime."""
@@ -450,6 +487,13 @@ def _retryable_provider_error(error):
 
 
 def _load_library(session):
+    """Return `(user, library_items)` for a session's Stremio account.
+
+    Raises `TerminalPlaybackError` for a failure that cannot recover during
+    this playback, and `TransientPlaybackError` for one governed by the
+    consecutive-failure budget.  The user is returned because folding a poll
+    observation into the tracker needs the resolved identity it owns.
+    """
     user_model = get_user_model()
     try:
         user = user_model.objects.get(id=session["user_id"], is_active=True)
@@ -470,7 +514,7 @@ def _load_library(session):
         reason = "credential_configuration"
         raise TerminalPlaybackError(reason) from error
     try:
-        return get_library_items(auth_key)
+        return user, get_library_items(auth_key)
     except ProviderAPIError as error:
         if _retryable_provider_error(error):
             reason = "provider_unavailable"
@@ -507,7 +551,7 @@ def observe_session(session_id, *, now=None):
         return PlaybackDecision("expired", session_id, reason="deadline")
 
     try:
-        items = _load_library(session)
+        user, items = _load_library(session)
     except TerminalPlaybackError as error:
         _close(client, key, old_raw, session_id)
         return PlaybackDecision("terminal", session_id, reason=str(error))
@@ -535,6 +579,13 @@ def observe_session(session_id, *, now=None):
             return PlaybackDecision("duplicate", session_id, reason="stale_observation")
         return PlaybackDecision("schedule", session_id, 30, reason="library_item_missing")
     observation = normalize_state(entry, session["media_id"], session["media_type"])
+
+    # The poll is the only source that reports a resume position for a client
+    # that cannot emit player events.  Gated on `exact`: the library's state is
+    # only about this session's video, and folding a sibling episode's position
+    # would file it under the wrong identity.
+    if observation["exact"]:
+        _record_poll_position(user, session, entry, now)
 
     if observation["duration"] > 0 and not session["runtime_deadline_set"]:
         session["deadline"] = deadline_for_runtime(
