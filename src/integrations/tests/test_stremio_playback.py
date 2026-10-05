@@ -190,6 +190,71 @@ class StremioPlaybackSessionTests(TestCase):
 
         self.assertEqual(movie.plays.count(), 0)
 
+    def test_a_removed_entry_stores_no_resume_position(self):
+        """An explicitly removed item has no live progress to fold.
+
+        `removed and not temp` is an item the user added and then removed, so
+        Stremio's own continue-watching excludes it and its `timeOffset` is a
+        leftover rather than a resume point.
+        """
+        with disable_fetch_releases():
+            item = Item.objects.create(
+                media_id="605",
+                source=Sources.TMDB.value,
+                media_type=MediaTypes.MOVIE.value,
+                provider_external_ids={"imdb_id": "tt102"},
+                title="Removed By Hand",
+                image="",
+            )
+            Movie.objects.create(
+                item=item,
+                user=self.user,
+                status=Status.IN_PROGRESS.value,
+            )
+
+        session_id = self.start("tt102")
+        self.library = self.state("tt102", 30, runtime_minutes=45)
+        self.library[0]["removed"] = True
+        self.library[0]["temp"] = False
+        self.library[0]["state"]["timeOffset"] = 20 * 60 * 1000
+        self.observe(session_id, 60)
+
+        self.assertFalse(
+            PlaybackProgress.objects.filter(user=self.user, item=item).exists(),
+        )
+
+    def test_an_auto_added_entry_still_stores_its_position(self):
+        """`temp` keeps a removed entry live, and that is the common case.
+
+        319 of the 411 live entries carrying a `timeOffset` in this account are
+        `removed` and `temp`, so gating on `removed` alone would discard most
+        real resume positions.
+        """
+        with disable_fetch_releases():
+            item = Item.objects.create(
+                media_id="606",
+                source=Sources.TMDB.value,
+                media_type=MediaTypes.MOVIE.value,
+                provider_external_ids={"imdb_id": "tt103"},
+                title="Auto Added",
+                image="",
+            )
+            Movie.objects.create(
+                item=item,
+                user=self.user,
+                status=Status.IN_PROGRESS.value,
+            )
+
+        session_id = self.start("tt103")
+        self.library = self.state("tt103", 30, runtime_minutes=45)
+        self.library[0]["removed"] = True
+        self.library[0]["temp"] = True
+        self.library[0]["state"]["timeOffset"] = 20 * 60 * 1000
+        self.observe(session_id, 60)
+
+        progress = PlaybackProgress.objects.get(user=self.user, item=item)
+        self.assertEqual(progress.position_seconds, 20 * 60)
+
     def test_movie_completion_at_ninety_percent(self):
         session_id = self.establish_movie_progress()
         self.library = self.state(

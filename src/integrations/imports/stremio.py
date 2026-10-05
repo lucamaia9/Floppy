@@ -9,8 +9,10 @@ Stremio exposes a small JSON-RPC-style API at ``https://api.strem.io/api``:
 
 Library items are keyed by IMDB id (``tt…``). Watched episodes of a series
 are stored as a bitfield serialized as ``{anchorVideoId}:{length}:{base64
-(zlib-deflated bytes)}`` where bit *i* (LSB-first per byte) corresponds to
-index *i* of the show's ordered video list from Cinemeta.
+(zlib-deflated bytes)}``. Bit *i* (LSB-first per byte) corresponds to index
+*i* of the show's ordered video list from Cinemeta **as it stood when the
+bitfield was written**; the anchor is that list's last video, which is what
+lets a decode be realigned against Cinemeta's current ordering.
 """
 
 import base64
@@ -157,10 +159,26 @@ def decode_watched_bitfield(watched_str, video_ids):
 
     The serialized form is ``{anchorVideoId}:{length}:{base64(zlib bytes)}``;
     the anchor video id may itself contain ``:`` so the last two components
-    are popped from the right. Returns (watched_ids, anchor_ok) where
-    anchor_ok is False when the anchor video isn't at the expected index,
-    meaning Cinemeta's ordering may have shifted since the bitfield was
-    written and per-bit positions can't be trusted.
+    are popped from the right.
+
+    ``length`` is the size of the video list when the bitfield was written and
+    the anchor is that list's **last** video, so bit ``length - 1`` belongs to
+    the anchor. Locating the anchor in the current list therefore fixes the
+    whole index mapping — bit *i* is video *i + offset*, where ``offset`` is
+    ``video_ids.index(anchor) - (length - 1)``. Treating bit *i* as video *i*
+    is only correct while the list is unchanged.
+
+    Cinemeta does insert episodes ahead of the anchor — a new special, a
+    re-ordered season — and then every index after the insertion is shifted.
+    That is not rare: 30 of the 135 series with a bitfield in the live library
+    have a non-zero offset, and reading them unaligned files watched state
+    against the wrong episodes (129 of the 162 mismatched ids were season 0,
+    landing on specials the user never watched).
+
+    Returns ``(watched_ids, anchored)``. ``anchored`` is False only when the
+    anchor is absent from the list, which leaves no reference point at all;
+    callers then fall back to the last-watched video. Bits whose aligned
+    position falls outside the list are dropped.
     """
     components = watched_str.split(":")
     if len(components) < BITFIELD_MIN_COMPONENTS:
@@ -172,19 +190,23 @@ def decode_watched_bitfield(watched_str, video_ids):
     anchor_video_id = ":".join(components)
 
     buf = zlib.decompress(base64.b64decode(serialized))
-    watched = {
-        video_id
-        for index, video_id in enumerate(video_ids)
-        if index < anchor_length
-        and index < len(buf) * 8
-        and buf[index >> 3] & (1 << (index & 7))
-    }
 
-    anchor_ok = (
-        anchor_video_id in video_ids
-        and video_ids.index(anchor_video_id) == anchor_length - 1
-    )
-    return watched, anchor_ok
+    if anchor_video_id in video_ids:
+        offset = video_ids.index(anchor_video_id) - (anchor_length - 1)
+        anchored = True
+    else:
+        offset = 0
+        anchored = False
+
+    watched = set()
+    for bit in range(min(anchor_length, len(buf) * 8)):
+        if not buf[bit >> 3] & (1 << (bit & 7)):
+            continue
+        index = bit + offset
+        if 0 <= index < len(video_ids):
+            watched.add(video_ids[index])
+
+    return watched, anchored
 
 
 def parse_video_id(video_id):
@@ -842,7 +864,7 @@ class StremioImporter:
 
         if watched_str and video_ids:
             try:
-                watched, anchor_ok = decode_watched_bitfield(watched_str, video_ids)
+                watched, anchored = decode_watched_bitfield(watched_str, video_ids)
             except (ValueError, zlib.error) as error:
                 logger.warning(
                     "Could not decode watched bitfield for %s: %s",
@@ -850,11 +872,11 @@ class StremioImporter:
                     error,
                 )
             else:
-                if anchor_ok:
+                if anchored:
                     return watched
                 logger.warning(
-                    "Watched bitfield anchor mismatch for %s; using last "
-                    "watched video only",
+                    "Watched bitfield anchor absent from the video list for "
+                    "%s; using last watched video only",
                     entry.get("_id"),
                 )
 

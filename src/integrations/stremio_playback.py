@@ -350,6 +350,20 @@ def poll_observation_from_state(media_type, media_id, entry):
         records_play=False,
     )
 
+def _entry_has_live_progress(entry):
+    """Return whether Stremio counts this entry's position as live progress.
+
+    Mirrors `LibraryItem::is_in_continue_watching` in stremio-core:
+    `not removed or temp`. `removed` alone is NOT a reason to skip — Stremio
+    keeps auto-added entries for a year and `temp` marks them, so
+    `removed and temp` is the dominant bucket for real in-flight progress
+    (319 of the 411 entries carrying a `timeOffset` in this account). Only
+    `removed and not temp` — explicitly added, then explicitly removed — has
+    left the user's active library, and its `timeOffset` is a leftover rather
+    than a resume point.
+    """
+    return not entry.get("removed") or bool(entry.get("temp"))
+
 def _record_poll_position(user, session, entry, now):
     """Fold this poll's resume position into the tracker merge point.
 
@@ -583,8 +597,10 @@ def observe_session(session_id, *, now=None):
     # The poll is the only source that reports a resume position for a client
     # that cannot emit player events.  Gated on `exact`: the library's state is
     # only about this session's video, and folding a sibling episode's position
-    # would file it under the wrong identity.
-    if observation["exact"]:
+    # would file it under the wrong identity.  Gated on liveness because a
+    # resume point is library-scoped; completion below still runs, so a removed
+    # item's viewing still reaches history.
+    if observation["exact"] and _entry_has_live_progress(entry):
         _record_poll_position(user, session, entry, now)
 
     if observation["duration"] > 0 and not session["runtime_deadline_set"]:
