@@ -8,11 +8,12 @@ Stremio exposes a small JSON-RPC-style API at ``https://api.strem.io/api``:
   -> every library item with its watch state.
 
 Library items are keyed by IMDB id (``tt…``). Watched episodes of a series
-are stored as a bitfield serialized as ``{anchorVideoId}:{length}:{base64
-(zlib-deflated bytes)}``. Bit *i* (LSB-first per byte) corresponds to index
-*i* of the show's ordered video list from Cinemeta **as it stood when the
-bitfield was written**; the anchor is that list's last video, which is what
-lets a decode be realigned against Cinemeta's current ordering.
+are stored as a bitfield serialized as ``{anchorVideoId}:{anchorLength}:{base64
+(zlib-deflated bytes)}``. Per stremio-core's ``WatchedField``, the anchor is the
+**last watched** video and ``anchorLength`` is that video's index plus one, so
+bit ``anchorLength - 1`` belongs to the anchor. Bit *i* (LSB-first per byte)
+indexes the show's ordered video list from Cinemeta as it stood when the
+bitfield was written; locating the anchor in the current list realigns it.
 """
 
 import base64
@@ -157,28 +158,34 @@ def get_library_items(auth_key):
 def decode_watched_bitfield(watched_str, video_ids):
     """Decode a serialized watched bitfield into a set of watched video ids.
 
-    The serialized form is ``{anchorVideoId}:{length}:{base64(zlib bytes)}``;
-    the anchor video id may itself contain ``:`` so the last two components
-    are popped from the right.
+    The serialized form is ``{anchorVideoId}:{anchorLength}:{base64(zlib
+    bytes)}``; the anchor video id may itself contain ``:`` so the last two
+    components are popped from the right.
 
-    ``length`` is the size of the video list when the bitfield was written and
-    the anchor is that list's **last** video, so bit ``length - 1`` belongs to
-    the anchor. Locating the anchor in the current list therefore fixes the
-    whole index mapping — bit *i* is video *i + offset*, where ``offset`` is
-    ``video_ids.index(anchor) - (length - 1)``. Treating bit *i* as video *i*
-    is only correct while the list is unchanged.
+    Per stremio-core's ``WatchedField``, the anchor is the **last watched**
+    video (``bitfield.last_index_of(true)``) and ``anchorLength`` is that
+    video's index plus one — so bit ``anchorLength - 1`` belongs to the anchor,
+    not the end of the list. Locating the anchor in the current list therefore
+    fixes the whole index mapping: bit *i* is video *i + offset*, where
+    ``offset = video_ids.index(anchor) - (anchorLength - 1)``. This is the same
+    shift ``WatchedBitField::construct_with_videos`` applies, so a decode here
+    agrees with what the Stremio client itself would show.
 
-    Cinemeta does insert episodes ahead of the anchor — a new special, a
-    re-ordered season — and then every index after the insertion is shifted.
-    That is not rare: 30 of the 135 series with a bitfield in the live library
-    have a non-zero offset, and reading them unaligned files watched state
-    against the wrong episodes (129 of the 162 mismatched ids were season 0,
-    landing on specials the user never watched).
+    Reading bit *i* as video *i* is only correct while the list is unchanged.
+    Cinemeta does re-order and extend it — a new special, a re-ordered season —
+    and then every index after the change is shifted. That is not rare: of the
+    135 series with a bitfield in the live library, 29 have the anchor at a
+    different index than recorded (a recoverable offset) and 1 no longer lists
+    it at all. Reading them unaligned files watched state against the wrong
+    episodes — 129 of the 162 mismatched ids were season 0, landing on specials
+    the user never watched.
 
     Returns ``(watched_ids, anchored)``. ``anchored`` is False only when the
-    anchor is absent from the list, which leaves no reference point at all;
-    callers then fall back to the last-watched video. Bits whose aligned
-    position falls outside the list are dropped.
+    anchor is absent from the list. stremio-core blanks the whole bitfield in
+    that case; this returns the unshifted bits with ``anchored=False`` so the
+    caller can fall back to the last-watched video rather than discarding the
+    user's history. Bits whose aligned position falls outside the list are
+    dropped.
     """
     components = watched_str.split(":")
     if len(components) < BITFIELD_MIN_COMPONENTS:
