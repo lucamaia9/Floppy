@@ -169,6 +169,49 @@ class ResolveMediaIdentityTests(TestCase):
 
         self.assertEqual(resolved, episode_item)
 
+    def test_episode_resolves_without_an_existing_play_row(self):
+        """The first viewing of an episode must resolve, with no Episode row.
+
+        ``Episode`` is a play row: nothing creates one for an episode the user
+        has not played yet. Resolving through it dropped every position and
+        play for a first viewing, which is exactly what the poll producer
+        exists to capture.
+        """
+        with disable_fetch_releases():
+            series_item = Item.objects.create(
+                media_id="1399",
+                source=Sources.TMDB.value,
+                media_type=MediaTypes.TV.value,
+                provider_external_ids={"imdb_id": "tt400"},
+                title="Fresh Series",
+                image="",
+            )
+            TV.objects.create(
+                item=series_item,
+                user=self.user,
+                status=Status.IN_PROGRESS.value,
+            )
+            episode_item = Item.objects.create(
+                media_id="1399",
+                source=Sources.TMDB.value,
+                media_type=MediaTypes.EPISODE.value,
+                season_number=1,
+                episode_number=2,
+                title="Never Played",
+                image="",
+            )
+
+        self.assertFalse(Episode.objects.filter(item=episode_item).exists())
+
+        resolved = stremio_tracker.resolve_media_identity(
+            self.user,
+            "series",
+            "tt400",
+            video_id="tt400:1:2",
+        )
+
+        self.assertEqual(resolved, episode_item)
+
     def test_imdb_source_item_resolves_by_media_id(self):
         """Some Items carry the IMDB id as media_id instead; both must match."""
         with disable_fetch_releases():

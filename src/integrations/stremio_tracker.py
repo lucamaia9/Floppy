@@ -20,8 +20,9 @@ from django.utils import timezone
 # `fork_views_playback` nor its `integrations.delivery` dependency imports this
 # module, so there is no cycle.
 from api.fork_views_playback import upsert_playback_progress
+from app import fork_services_episode
 from app import fork_services_play_dedupe as play_dedupe
-from app.models import Episode, Item, Movie, PlaybackProgress
+from app.models import Item, Movie, PlaybackProgress
 from app.models.choices import MediaTypes, Sources
 from app.services.progress_changes import record_progress_deletion
 
@@ -90,6 +91,12 @@ def _episode_item(user, series_imdb_id, season_number, episode_number):
 
     Episode Items are keyed by the *series* media_id plus season_number and
     episode_number — they do not carry a composite tt123:1:2 media_id.
+
+    This deliberately does NOT join through ``Episode``. ``Episode`` is a play
+    row: nothing creates one for an episode the user has not played yet, so
+    requiring it would drop every position and play for the first viewing of an
+    episode — which is exactly what the poll producer exists to capture. User
+    scoping comes from ``_series_item``, which already filters ``tv__user``.
     """
     series_item = _series_item(user, series_imdb_id)
     if series_item is None:
@@ -101,7 +108,6 @@ def _episode_item(user, series_imdb_id, season_number, episode_number):
             media_type=MediaTypes.EPISODE.value,
             season_number=season_number,
             episode_number=episode_number,
-            episode__related_season__user=user,
         )
         .distinct()
         .first()
@@ -420,34 +426,44 @@ def _append_play(user, item, external_id, ended_at):
                 ended_at,
             )
             return False
-        _play, created = movie.watch(ended_at, external_id=external_id)
-        return bool(created)
-
-    episode = (
-        Episode.objects.filter(item=item, related_season__user=user)
-        .select_related("related_season")
-        .first()
-    )
-    if episode is not None:
-        play_key = (item.media_id, item.season_number, item.episode_number)
-        if play_dedupe.existing_episode_play_times(
-            user,
-            media_ids=[item.media_id],
-            source=item.source,
-        ).is_duplicate(play_key, ended_at):
-            logger.debug(
-                "stremio_tracker status=duplicate_play source=episode near=%s",
-                ended_at,
-            )
-            return False
-        result = episode.related_season.watch(
-            item.episode_number,
+        _play, created = movie.watch(
             ended_at,
             external_id=external_id,
+            entry_source="stremio",
         )
-        return bool(result.created)
+        return bool(created)
 
-    return False
+    # The tracked Season may not exist yet. An Episode row is created only for
+    # an episode the user has already played, so the first viewing of an episode
+    # has none — requiring one here would silently drop that play. Resolve (or
+    # create) the season the same way the Jellyfin playback reporter does.
+    season = fork_services_episode.resolve_or_create_season(
+        user,
+        item.media_id,
+        item.source,
+        item.season_number,
+    )
+    if season is None:
+        return False
+
+    play_key = (item.media_id, item.season_number, item.episode_number)
+    if play_dedupe.existing_episode_play_times(
+        user,
+        media_ids=[item.media_id],
+        source=item.source,
+    ).is_duplicate(play_key, ended_at):
+        logger.debug(
+            "stremio_tracker status=duplicate_play source=episode near=%s",
+            ended_at,
+        )
+        return False
+    result = season.watch(
+        item.episode_number,
+        ended_at,
+        external_id=external_id,
+        entry_source="stremio",
+    )
+    return bool(result.created)
 
 
 def persist_merge_result(

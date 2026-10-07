@@ -62,7 +62,7 @@ class ParseLibraryExtraTests(SimpleTestCase):
         self.assertEqual(event.video_ids, ())
 
     def test_video_id_batch_splits_on_comma(self):
-        """library events batch up to 100 video ids in one request."""
+        """Library events batch up to 100 video ids in one request."""
         event = stremio_events.parse_library_extra(
             "action=unwatched&videoId=tt1%3A1%3A2%2Ctt1%3A1%3A3%2Ctt1%3A1%3A4",
         )

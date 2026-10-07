@@ -356,7 +356,10 @@ urlpatterns = [
     re_path(
         r"^stremio-addon/(?P<token>[^/]+)/subtitles/"
         r"(?P<media_type>movie|series)/(?P<media_id>[^/]+?)"
-        r"(?:/(?P<extra>[^/]*))?\.json$",
+        # The extra carries the release filename, which routinely contains a
+        # slash, so it must span path segments. Upstream matched this tail with
+        # a wildcard; capturing it must not narrow what the route accepts.
+        r"(?:/(?P<extra>.*))?\.json$",
         views.stremio_addon_subtitles,
         name="stremio_addon_subtitles",
     ),
