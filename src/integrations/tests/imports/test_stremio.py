@@ -547,6 +547,48 @@ class ImportStremioTests(TestCase):
             {1, 2},
         )
 
+    def test_series_with_an_empty_bitfield_keeps_the_last_watched_episode(self):
+        """An empty bitfield asserts nothing, so the fallback still applies.
+
+        Stremio writes one for a series whose state carries a `video_id` and
+        `timesWatched` but no per-episode bits — Dexter and Naked Attraction
+        are live examples. The anchor resolves, so a decoder that returned the
+        empty set would silently drop the only episode the state names.
+        """
+        video_ids = [f"tt0903747:1:{episode}" for episode in range(1, 4)]
+        library_items = [
+            {
+                "_id": "tt0903747",
+                "type": "series",
+                "name": "Breaking Bad",
+                "removed": False,
+                "temp": False,
+                "state": {
+                    "watched": encode_watched_bitfield(video_ids, set()),
+                    "lastWatched": "2023-01-02T00:00:00Z",
+                    "video_id": "tt0903747:1:3",
+                    "timesWatched": 1,
+                },
+            },
+        ]
+
+        imported_counts, warnings = self._run_import(
+            library_items,
+            cinemeta_videos={"tt0903747": video_ids},
+        )
+
+        self.assertEqual(warnings, "")
+        self.assertEqual(imported_counts[MediaTypes.EPISODE.value], 1)
+        self.assertEqual(
+            set(
+                Episode.objects.filter(item__media_id="1396").values_list(
+                    "item__episode_number",
+                    flat=True,
+                ),
+            ),
+            {3},
+        )
+
     def test_series_bitfield_gaps_do_not_complete_season(self):
         """A final watched episode does not hide gaps in the season."""
         video_ids = [f"tt0903747:1:{episode}" for episode in range(1, 4)]

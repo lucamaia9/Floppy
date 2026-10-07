@@ -879,13 +879,20 @@ class StremioImporter:
                     error,
                 )
             else:
-                if anchored:
+                # An aligned decode is only useful when it carries bits. An
+                # empty bitfield asserts nothing — Stremio writes one for a
+                # series whose state has a `video_id`/`timesWatched` but no
+                # per-episode bits — so returning it would drop the
+                # last-watched episode the fallback below recovers. Two live
+                # series (Dexter, Naked Attraction) have exactly that shape.
+                if anchored and watched:
                     return watched
-                logger.warning(
-                    "Watched bitfield anchor absent from the video list for "
-                    "%s; using last watched video only",
-                    entry.get("_id"),
-                )
+                if not anchored:
+                    logger.warning(
+                        "Watched bitfield anchor absent from the video list for "
+                        "%s; using last watched video only",
+                        entry.get("_id"),
+                    )
 
         # Fallback: mark only the last played video as watched.
         if watched_str or state.get("flaggedWatched") or state.get("timesWatched"):
